@@ -18,28 +18,28 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 | Bar height | 36 pt | Full width of window |
 | Traffic light inset | 78 pt | Left padding for tabs to clear window controls |
 | Right inset | 8 pt | Padding before edge |
-| Top inset (active tab) | 4 pt | Clearance above 30 pt active tab |
-| Top inset (inactive tab) | 6 pt | Clearance above 28 pt inactive tab |
+| Top inset | 4 pt | Clearance above the 30 pt tab (uniform for all tabs) |
 | Bottom margin | 2 pt | Applied uniformly below all tabs to satisfy bottom-alignment |
+
+**Uniform height:** Following Chrome-Refresh / Helium, all tabs are the **same height** (30 pt) regardless of selection. The active tab is distinguished by a filled background pill, not by being taller — this avoids vertical reflow jank on selection change.
 
 ### 2.2 Tab Items
 
 | Property | Value | Notes |
 |----------|-------|-------|
-| Shape | Pill — uniform 7 pt corner radius | All four corners, not just top |
-| Overlap | None | 4 pt gap between adjacent tabs |
-| Height (active) | 30 pt | Bottom-aligned within the 36 pt bar |
-| Height (inactive) | 28 pt | Bottom-aligned (same bottom edge as active) |
-| Min width | 100 pt | Below this: tab bar scrolls |
-| Max width | 220 pt | With title truncation |
-| Background (active) | `#0a0a0e` (page color) | Matches the content area below |
+| Shape | Pill — uniform 8 pt corner radius | All four corners, not just top (`CGPath(roundedRect:)`) |
+| Overlap | None | 4 pt gap between adjacent tabs (`NSStackView.spacing = 4`) |
+| Height | 30 pt (uniform) | Same for active and inactive; bottom-aligned within the 36 pt bar |
+| Min width | 120 pt | Below this: tab bar scrolls |
+| Max width | 400 pt | Cap only; tabs **stretch to share the available strip width** (Helium/Chrome expand-to-fill). Few tabs → wide, filling toward the window edge; more tabs → shrink toward min. Width = `clamp(available / count, 120, 400)`, recomputed on resize |
+| Background (active) | `calibratedWhite 0.17` (~`#2b2b2b`) | Filled *lighter* surface pill floating above the darker strip (Helium), not near-black; distinguishes selection instead of extra height |
 | Background (hover) | `rgba(255,255,255,0.08)` | Inactive tabs only |
 | Background (default) | Transparent | Inactive, not hovered |
 | Text color (active) | `#ffffff` | — |
 | Text color (hover) | `#cccccc` | — |
 | Text color (default) | `#999999` | — |
-| Font size | 11 pt | System font |
-| Font weight | Regular (all states) | **No weight change** — prevents layout jank |
+| Font size | 12 pt | System font |
+| Font weight | Regular (all states) | **No weight change** — Chrome/Helium never bolds the active tab; also prevents layout jank |
 
 **Active tab height anchor:** Bottom-aligned. Even though a separate address-bar row breaks the classic "merge with content" illusion, bottom-alignment is the browser convention and matches the current implementation's `.bottom` alignment on `tabStack` + `edgeInsets(top: 4, ...)`.
 
@@ -52,11 +52,11 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
     ↑ 10pt    ↑ 5pt gap   ↑ ellipsis        ↑ 8pt
 ```
 
-- **Favicon:** 14×14 pt, left-aligned, 10 pt from leading edge
+- **Favicon:** 16×16 pt, left-aligned, 10 pt from leading edge
 - **Loading spinner:** Replaces favicon frame while page is loading (NSProgressIndicator, `.spinning` style, small control size)
 - **Title:** Single line, `.byTruncatingTail` ellipsis at min-width floor
-- **Close button:** 14×14 pt SF Symbol `xmark` / `xmark.circle.fill` — same size as favicon.
-  - **Favicon→Close reveal:** Favicon visible by default at the left edge. Close button sits at the right edge (Chrome/Firefox/Safari convention). On hover: favicon is hidden (avoids visual crowding) and close button becomes visible at its own right-side position. No frame sharing — the two elements have independent, fixed positions. Loading spinner hides on hover too.
+- **Close button:** 16×16 pt SF Symbol `xmark` / `xmark.circle.fill` — same size as favicon.
+  - **Favicon→Close reveal:** Two independent, fixed-position elements — not frame-shared. Favicon sits at the left edge (10 pt from leading). Close button sits at the right edge (8 pt from trailing). On hover: favicon and loading spinner are hidden; close button becomes visible at its own right-side position. Both elements are 14×14 pt, so no size pop on state change. This matches the Chrome/Firefox/Safari convention of separate left/right icon slots rather than a single shared frame.
   - Visibility: Close visible on active tabs always; on inactive tabs, visible only on hover.
   - Icon: `xmark.circle.fill` (filled circle) for active tab, `xmark` (thin) for inactive/hovered.
 - **Spacing:** 5 pt gap between favicon and title; 8 pt padding on each side.
@@ -113,7 +113,7 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Min width:** 200 pt
 - **Height:** 32 pt
 - **Corner radius:** 16 pt (fully rounded pill shape — half of 32 pt height, the geometric maximum for stadium rounding)
-- **Background:** `#1c1c28` (R28/G28/B40 — cool blue tint, not neutral gray)
+- **Background:** `calibratedWhite 0.17` (~`#2b2b2b`, neutral gray) — shares the same "surface" tone as the active tab pill, per Helium. (Earlier drafts used a blue-tinted `#1c1c28`; Helium's omnibox is neutral gray, so the tint was dropped.)
 - **Border:** 0.5 pt, `rgba(255,255,255,0.08)`
 - **Elevation:** `0 1px 4px rgba(0,0,0,0.3)` box shadow
 
@@ -127,7 +127,7 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 ```
 
 - **Security icon:** `lock.fill` (HTTPS, `.tertiaryLabelColor`) or `globe` (HTTP, `.secondaryLabelColor`) or `magnifyingglass` (search/start page, `.secondaryLabelColor`)
-- **URL text:** 12 pt, `.labelColor`, `.byTruncatingHead` line break mode
+- **URL text:** 14 pt, `.labelColor`, `.byTruncatingHead` line break mode
 - **Background when not editing:** Transparent (the pill itself provides the background)
 - **Edit state:** Signaled by border glow only (`controlAccentColor` at 40% opacity, 1 pt border). Background unchanged — the text field is always transparent and the pill's resting background (`#1c1c28`) provides the base.
 - **Right-side action button:** Bookmark star (SF Symbol `star`) — optional, shows `.secondaryLabelColor` when not bookmarked, `.systemYellow` when bookmarked
@@ -137,9 +137,18 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 
 - No bezel, no border, no background (transparent; pill background shows through)
 - Focus ring: none (managed by pill border glow)
-- Placeholder: "Search or enter address" in `.secondaryLabelColor`
+- Placeholder: "Search Google or type a URL" in `.secondaryLabelColor`
+- **Alignment:** centered (minimal Helium omnibox) for both the placeholder and the resting URL; switches to left-aligned (`.natural`) while the field is focused/editing. Field is a fixed height, vertically centred inside the pill (an editable `NSTextField` does not vertically centre its own text), with symmetric left/right margins so centred text lands on the pill's centre.
 - Truncation: `.byTruncatingHead` (shows the end of long URLs)
 - Delegate handles: Enter → navigate, Escape → cancel + refocus webview
+- **Click-to-focus:** a single-click `NSClickGestureRecognizer` on the pill focuses the field (native click-to-focus is unreliable here — movable-by-background window + the field not filling the whole pill). A gesture delegate declines once the field editor is active so subsequent clicks reach it for cursor placement / selection.
+- **New blank tab → address bar focus:** opening a blank new tab (⌘T, "+") drops the caret into the address bar so the user can type immediately. The focus call is deferred one tick because a freshly-added `WKWebView` grabs first responder on its first display and would otherwise steal it back.
+
+### 3.5 Titlebar Double-Click
+
+- Double-clicking an **empty area of the tab bar** (the titlebar-equivalent row) behaves like double-clicking a native window titlebar (our custom chrome covers the real titlebar, so this is wired manually via a 2-click `NSClickGestureRecognizer`). The recognizer is **not** attached to the address-bar row — an ancestor recognizer there would swallow the click that focuses the editable URL field, breaking typing.
+- Honours **System Settings ▸ Desktop & Dock ▸ "Double-click a window's title bar to"** (`AppleActionOnDoubleClick`): `Maximize`/unset → `window.zoom`, `Minimize` → miniaturize, `None` → no-op.
+- Clicks on tabs, buttons, or the URL field keep their own behaviour (tab select, word-select, etc.) — controls consume the event before it reaches the bar's recognizer.
 
 ## 4. Tab Manager Interactions
 
@@ -187,3 +196,7 @@ See `docs/superpowers/plans/YYYY-MM-DD-chrome-helium-implementation.md` (separat
 - [x] **Internal consistency:** Dimensions, colors, and layout rules are coherent across sections
 - [x] **Scope check:** Focused entirely on chrome redesign for a single file; no scope creep
 - [x] **Ambiguity check:** Tab height anchor, overflow behavior, nav button placement, and favicon/close swap are all explicitly resolved
+
+### Implementation Notes
+
+- **Tab text colors** use semantic `NSColor` equivalents (`.labelColor`, `.secondaryLabelColor`, `.tertiaryLabelColor`) rather than literal hex values (`#ffffff`, `#cccccc`, `#999999`). This tracks system appearance including light-mode and accessibility contrast settings. Deviation from spec hex values is intentional for system-compatibility reasons.

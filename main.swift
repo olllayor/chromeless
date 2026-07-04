@@ -1,8 +1,7 @@
-// chromeless — the browser that isn't there.
+// chromeless — a minimal browser with Chrome-style tab bar.
 //
-// A single-file macOS browser with zero chrome: no tabs, no toolbar, no
-// address bar — just the page, in a bare rounded window. Built on WKWebView
-// (the Safari engine). Made for clean screenshots and fullscreen video.
+// A single-file macOS browser with Chrome-style persistent tab bar and
+// address bar. Built on WKWebView (the Safari engine).
 //
 //   ⌘L  search / open url        ⇧⌘S  snapshot page → Desktop
 //   ⌘R  reload                   ⌘P   pin window on top
@@ -37,6 +36,34 @@ final class SuggestionRow: NSView {
 
     override func mouseUp(with event: NSEvent) {
         _ = clickTarget?.perform(clickAction, with: self)
+    }
+}
+
+// MARK: - Chrome typography
+
+private enum ChromeFont {
+    static let tabTitle = NSFont.systemFont(ofSize: 12)
+    static let urlField = NSFont.systemFont(ofSize: 14)
+    static let hudField = NSFont.systemFont(ofSize: 16)
+    static let findField = NSFont.systemFont(ofSize: 14)
+    static let findStatus = NSFont.systemFont(ofSize: 12)
+    static let toast = NSFont.systemFont(ofSize: 13, weight: .medium)
+    static let suggestionTitle = NSFont.systemFont(ofSize: 12)
+    static let suggestionURL = NSFont.systemFont(ofSize: 10)
+    static let hudSuggestionTitle = NSFont.systemFont(ofSize: 13)
+    static let hudSuggestionURL = NSFont.systemFont(ofSize: 11)
+    static let downloadTitle = NSFont.systemFont(ofSize: 12)
+    static let downloadStatus = NSFont.systemFont(ofSize: 11)
+
+    static func placeholder(_ string: String, font: NSFont, color: NSColor,
+                            alignment: NSTextAlignment = .natural) -> NSAttributedString {
+        var attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+        if alignment != .natural {
+            let style = NSMutableParagraphStyle()
+            style.alignment = alignment
+            attrs[.paragraphStyle] = style
+        }
+        return NSAttributedString(string: string, attributes: attrs)
     }
 }
 
@@ -321,6 +348,10 @@ let startPageHTML = """
   <p class="tag">the browser that isn&rsquo;t there</p>
   <div class="keys">
     <div class="k"><kbd>&#8984; L</kbd></div>       <div>search or enter a url</div>
+    <div class="k"><kbd>&#8984; T</kbd> <kbd>&#8984; W</kbd></div><div>new tab / close tab</div>
+    <div class="k"><kbd>&#8984; F</kbd></div>       <div>find on page</div>
+    <div class="k"><kbd>&#8984; D</kbd></div>       <div>bookmark this page</div>
+    <div class="k"><kbd>&#8679;&#8984; J</kbd></div><div>downloads</div>
     <div class="k"><kbd>&#8984; drag</kbd></div>    <div>move the window</div>
     <div class="k"><kbd>&#8963;&#8984; F</kbd></div><div>fullscreen</div>
     <div class="k"><kbd>&#8679;&#8984; S</kbd></div><div>snapshot the page &rarr; desktop</div>
@@ -330,7 +361,7 @@ let startPageHTML = """
     <div class="k"><kbd>&#8984; =</kbd> <kbd>&#8984; &minus;</kbd> <kbd>&#8984; 0</kbd></div><div>zoom</div>
     <div class="k"><kbd>&#8679;&#8984; C</kbd></div><div>copy current url</div>
   </div>
-  <footer>&#8984;N new window &nbsp;&middot;&nbsp; &#8984;R reload &nbsp;&middot;&nbsp; &#8984;W close</footer>
+  <footer>&#8984;N new window &nbsp;&middot;&nbsp; &#8984;R reload &nbsp;&middot;&nbsp; &#8679;&#8984;W close window</footer>
 </main></body></html>
 """
 
@@ -609,38 +640,71 @@ final class Tab {
 }
 
 final class TabBarItem: NSView {
+
+    static let minWidth: CGFloat = 120
+    // Generous ceiling so a small number of tabs stretch to fill the strip
+    // (Helium/Chrome expand-to-fill), only capping so a lone tab isn't absurd.
+    static let maxWidth: CGFloat = 400
+
+    // MARK: - Tab shape path helper
+
+    private static let _pathCache = NSCache<NSString, CGPath>()
+
+    private func tabShapePath(size: CGSize) -> CGPath {
+        let key = "\(Int(size.width))x\(Int(size.height))" as NSString
+        if let cached = Self._pathCache.object(forKey: key) { return cached }
+        // Helium/Chrome-Refresh pill: all four corners rounded uniformly.
+        let r: CGFloat = 8
+        let rect = CGRect(origin: .zero, size: size)
+        let path = CGPath(roundedRect: rect, cornerWidth: r, cornerHeight: r, transform: nil)
+        Self._pathCache.setObject(path, forKey: key)
+        return path
+    }
     let index: Int
     let faviconView = NSImageView()
+    let loadingSpinner = NSProgressIndicator()
     let titleLabel = NSTextField(labelWithString: "")
     let closeButton = NSButton()
     var isSelected = false
     var isHovered = false
+    var isLoading = false
+    private var shapeLayer: CAShapeLayer?
     private weak var target: AnyObject?
     private let clickAction: Selector
     private let closeAction: Selector
+    private var secondaryAction: Selector?
 
-    init(index: Int, title: String, favicon: NSImage?, isSelected: Bool,
-         target: AnyObject?, clickAction: Selector, closeAction: Selector) {
+    init(index: Int, title: String, favicon: NSImage?, isSelected: Bool, isLoading: Bool,
+         target: AnyObject?, clickAction: Selector, closeAction: Selector,
+         secondaryAction: Selector? = nil) {
         self.index = index
         self.isSelected = isSelected
+        self.isLoading = isLoading
         self.target = target
         self.clickAction = clickAction
         self.closeAction = closeAction
+        self.secondaryAction = secondaryAction
         super.init(frame: .zero)
 
         wantsLayer = true
-        layer?.cornerRadius = 8
-        layer?.cornerCurve = .continuous
 
         faviconView.image = favicon
         faviconView.imageScaling = .scaleProportionallyDown
         faviconView.setContentHuggingPriority(.required, for: .horizontal)
+        faviconView.isHidden = isLoading
         addSubview(faviconView)
 
+        loadingSpinner.style = .spinning
+        loadingSpinner.controlSize = .small
+        loadingSpinner.isDisplayedWhenStopped = false
+        loadingSpinner.setContentHuggingPriority(.required, for: .horizontal)
+        if isLoading { loadingSpinner.startAnimation(nil) }
+        addSubview(loadingSpinner)
+
         titleLabel.stringValue = title.isEmpty ? "New Tab" : title
-        titleLabel.font = .systemFont(ofSize: 12)
+        titleLabel.font = ChromeFont.tabTitle
         titleLabel.lineBreakMode = .byTruncatingTail
-        titleLabel.truncatesLastVisibleLine = true
+        (titleLabel.cell as? NSTextFieldCell)?.truncatesLastVisibleLine = true
         titleLabel.maximumNumberOfLines = 1
         titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(titleLabel)
@@ -648,8 +712,8 @@ final class TabBarItem: NSView {
         closeButton.title = ""
         closeButton.bezelStyle = .inline
         closeButton.isBordered = false
-        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
-        closeButton.contentTintColor = .secondaryLabelColor
+        closeButton.image = NSImage(systemSymbolName: isSelected ? "xmark.circle.fill" : "xmark", accessibilityDescription: "Close tab")
+        closeButton.contentTintColor = isSelected ? .secondaryLabelColor : .tertiaryLabelColor
         closeButton.target = target
         closeButton.action = closeAction
         closeButton.tag = index
@@ -660,6 +724,12 @@ final class TabBarItem: NSView {
         let click = NSClickGestureRecognizer(target: target, action: clickAction)
         addGestureRecognizer(click)
 
+        if let secondaryAction {
+            let rightClick = NSClickGestureRecognizer(target: target, action: secondaryAction)
+            rightClick.buttonMask = 0x2
+            addGestureRecognizer(rightClick)
+        }
+
         updateAppearance()
     }
 
@@ -668,23 +738,38 @@ final class TabBarItem: NSView {
     override func layout() {
         super.layout()
         let h = bounds.height
-        let pad: CGFloat = 8
-        let favSize: CGFloat = 16
-        let closeSize: CGFloat = 18
+        let pad: CGFloat = 10
+        let iconSize: CGFloat = 16
+        let closeSize: CGFloat = 16
         let gap: CGFloat = 6
 
-        var x: CGFloat = pad
-        faviconView.frame = NSRect(x: x, y: (h - favSize) / 2, width: favSize, height: favSize)
-        x += favSize + gap
+        faviconView.frame = NSRect(x: pad, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
+        loadingSpinner.frame = faviconView.frame
 
-        let closeW: CGFloat = closeButton.isHidden ? 0 : closeSize + 4
-        let titleW = bounds.width - x - pad - closeW
-        titleLabel.frame = NSRect(x: x, y: 0, width: max(0, titleW), height: h)
+        let titleX = pad + iconSize + gap
+        let closeW = closeSize + 4
+        let titleW = bounds.width - titleX - pad - closeW
+        let titleH = ceil(ChromeFont.tabTitle.boundingRectForFont.height)
+        titleLabel.frame = NSRect(x: titleX, y: (h - titleH) / 2, width: max(0, titleW), height: titleH)
 
-        if !closeButton.isHidden {
-            closeButton.frame = NSRect(x: bounds.width - pad - closeSize, y: (h - closeSize) / 2,
-                                        width: closeSize, height: closeSize)
+        closeButton.frame = NSRect(x: bounds.width - pad - closeSize, y: (h - closeSize) / 2,
+                                    width: closeSize, height: closeSize)
+
+        // Update the tab shape path whenever layout changes
+        updateShapePath()
+    }
+
+    private func updateShapePath() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        if shapeLayer == nil {
+            let mask = CAShapeLayer()
+            mask.frame = bounds
+            mask.fillColor = NSColor.black.cgColor
+            layer?.mask = mask
+            shapeLayer = mask
         }
+        shapeLayer?.frame = bounds
+        shapeLayer?.path = tabShapePath(size: bounds.size)
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -699,61 +784,89 @@ final class TabBarItem: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
-    func updateAppearance() {
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            if isSelected {
-                layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
-            } else if isHovered {
-                layer?.backgroundColor = NSColor.white.withAlphaComponent(0.06).cgColor
-            } else {
-                layer?.backgroundColor = NSColor.clear.cgColor
-            }
-            closeButton.animator().isHidden = !isHovered && !isSelected
-        }
-        titleLabel.textColor = isSelected ? .labelColor : .secondaryLabelColor
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInKeyWindow],
+            owner: self,
+            userInfo: nil
+        ))
     }
 
-    func update(title: String, favicon: NSImage?) {
-        titleLabel.stringValue = title.isEmpty ? "New Tab" : title
-        faviconView.image = favicon
+    func updateAppearance() {
+        // Helium: active tab is a lighter "surface" pill that floats above the
+        // darker tab strip — not near-black. Matches the URL pill's surface tone.
+        let activeSurface = NSColor(calibratedWhite: 0.17, alpha: 1)
+        if isSelected {
+            layer?.backgroundColor = activeSurface.cgColor
+            closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close tab")
+            closeButton.contentTintColor = .secondaryLabelColor
+            titleLabel.textColor = .labelColor
+        } else if isHovered {
+            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
+            closeButton.contentTintColor = .tertiaryLabelColor
+            titleLabel.textColor = .secondaryLabelColor
+        } else {
+            layer?.backgroundColor = NSColor.clear.cgColor
+            closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
+            closeButton.contentTintColor = .tertiaryLabelColor
+            titleLabel.textColor = .tertiaryLabelColor
+        }
+        closeButton.isHidden = !(isHovered || isSelected)
+    }
+
+    func update(title: String? = nil, favicon: NSImage? = nil, loading: Bool? = nil) {
+        if let title { titleLabel.stringValue = title.isEmpty ? "New Tab" : title }
+        if let favicon { faviconView.image = favicon }
+        if let loading {
+            isLoading = loading
+            faviconView.isHidden = loading
+            if loading {
+                loadingSpinner.startAnimation(nil)
+            } else {
+                loadingSpinner.stopAnimation(nil)
+            }
+        }
     }
 }
 
 final class TabManager {
     var tabs: [Tab] = []
     private(set) var currentIndex: Int = 0
+    private var mruOrder: [Tab] = []
     var current: Tab? {
         guard currentIndex >= 0, currentIndex < tabs.count else { return nil }
         return tabs[currentIndex]
     }
     var onTabsChanged: (() -> Void)?
 
-    func newTab(url: URL?, configuration: WKWebViewConfiguration) -> Tab {
-        let wv = BrowserWebView(frame: .zero, configuration: configuration)
-        let tab = Tab(webView: wv)
-        tabs.append(tab)
-        currentIndex = tabs.count - 1
-        if let url { wv.load(URLRequest(url: url)) }
-        onTabsChanged?()
-        return tab
-    }
-
     func select(_ tab: Tab) {
         guard let idx = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         currentIndex = idx
+        mruOrder.removeAll { $0.id == tab.id }
+        mruOrder.insert(tab, at: 0)
         onTabsChanged?()
     }
 
     func selectIndex(_ idx: Int) {
         guard idx >= 0, idx < tabs.count else { return }
         currentIndex = idx
+        let tab = tabs[idx]
+        mruOrder.removeAll { $0.id == tab.id }
+        mruOrder.insert(tab, at: 0)
         onTabsChanged?()
     }
 
     func close(_ tab: Tab) {
         guard let idx = tabs.firstIndex(where: { $0.id == tab.id }) else { return }
         tabs.remove(at: idx)
+        mruOrder.removeAll { $0.id == tab.id }
+        if idx <= currentIndex {
+            currentIndex = max(0, currentIndex - 1)
+        }
         if currentIndex >= tabs.count { currentIndex = max(0, tabs.count - 1) }
         onTabsChanged?()
     }
@@ -763,16 +876,49 @@ final class TabManager {
         close(tabs[currentIndex])
     }
 
+    func cycleMRU(backward: Bool) {
+        guard mruOrder.count > 1 else { return }
+        if backward {
+            let last = mruOrder.removeLast()
+            mruOrder.insert(last, at: 0)
+        } else {
+            let first = mruOrder.removeFirst()
+            mruOrder.append(first)
+        }
+        select(mruOrder[0])
+    }
+
     var count: Int { tabs.count }
     var isEmpty: Bool { tabs.isEmpty }
+
+    func replaceAll(with tab: Tab) {
+        tabs = [tab]
+        mruOrder = [tab]
+        currentIndex = 0
+        onTabsChanged?()
+    }
+
+    func closeAll(except keepTab: Tab) {
+        let toClose = tabs.filter { $0.id != keepTab.id }
+        for tab in toClose.reversed() {
+            guard let idx = tabs.firstIndex(where: { $0.id == tab.id }) else { continue }
+            tabs.remove(at: idx)
+            mruOrder.removeAll { $0.id == tab.id }
+            if idx <= currentIndex {
+                currentIndex = max(0, currentIndex - 1)
+            }
+            if currentIndex >= tabs.count { currentIndex = max(0, tabs.count - 1) }
+        }
+        onTabsChanged?()
+    }
 }
 
 // MARK: - Views
 
 final class BrowserWebView: WKWebView {
-    // Bare Esc escapes back to the start page — unless fullscreen needs it,
-    // or the ⌘L HUD is open (its field is first responder and handles Esc itself).
     var onEscape: (() -> Bool)?
+    var onTabCycle: ((Bool) -> Void)?
+    var onTabSwitch: ((Int) -> Void)?
 
     override func keyDown(with event: NSEvent) {
         if event.keyCode == 53, // Esc
@@ -782,7 +928,31 @@ final class BrowserWebView: WKWebView {
            onEscape?() == true {
             return
         }
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 48, mods.contains(.control) {
+            onTabCycle?(mods.contains(.shift))
+            return
+        }
+        if mods.contains(.command), event.keyCode >= 18, event.keyCode <= 26 {
+            let index = Int(event.keyCode - 18)
+            onTabSwitch?(index)
+            return
+        }
         super.keyDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        if event.keyCode == 48, mods.contains(.control) {
+            onTabCycle?(mods.contains(.shift))
+            return true
+        }
+        if mods.contains(.command), event.keyCode >= 18, event.keyCode <= 26 {
+            let index = Int(event.keyCode - 18)
+            onTabSwitch?(index)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
     }
 
     // ⌘-drag anywhere moves the window; mouse buttons 4/5 go back/forward.
@@ -819,7 +989,8 @@ final class OverlayRootView: NSView {
 // MARK: - Browser window
 
 final class BrowserWindowController: NSWindowController, NSWindowDelegate,
-    WKNavigationDelegate, WKUIDelegate, NSTextFieldDelegate, NSMenuItemValidation {
+    WKNavigationDelegate, WKUIDelegate, NSTextFieldDelegate, NSMenuItemValidation,
+    NSGestureRecognizerDelegate {
 
     var webView: BrowserWebView
     let tabManager = TabManager()
@@ -831,11 +1002,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let toastView = NSVisualEffectView()
     private let toastLabel = NSTextField(labelWithString: "")
     private var observations: [NSKeyValueObservation] = []
+    private var tabItemObservations: [NSKeyValueObservation] = []
+    private var tabItemViews: [TabBarItem] = []
+    private var tabWidthConstraints: [NSLayoutConstraint] = []
     private var mouseMonitor: Any?
     private var snapJob: SnapJob?
     private var toastHide: DispatchWorkItem?
     private var lastProgress: CGFloat = 0
     private var onStartPage = false
+    private var lastHoveredButton: NSButton?
     var onClose: (() -> Void)?
     private let findBar = NSVisualEffectView()
     private let findField = NSTextField()
@@ -848,12 +1023,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let downloadsOverlay = NSVisualEffectView()
     private let downloadsStack = NSStackView()
     private let downloadsScrollView = NSScrollView()
+    private let tabBarHeight: CGFloat = 36
+    private let toolbarHeight: CGFloat = 40
+    private let tabToolbarOverlap: CGFloat = 2
+    private let centeredLocationBarMaxWidth: CGFloat = 700
+    private let trafficLightInset: CGFloat = 78
+    private var chromeTopHeight: CGFloat { tabBarHeight + toolbarHeight - tabToolbarOverlap }
     private let tabBar = NSVisualEffectView()
+    private let tabBarSeparator = NSView()
     private let tabStack = NSStackView()
-    private var tabBarVisible = false
-    private var tabBarTimer: DispatchWorkItem?
-    private let suggestionsView = NSVisualEffectView()
-    private let suggestionsBacking = NSView()
+    private let toolbarBar = NSVisualEffectView()
+    private let locationBar = NSVisualEffectView()
+    private let locationIcon = NSImageView()
+    private let backBtn = NSButton()
+    private let forwardBtn = NSButton()
+    private let reloadBtn = NSButton()
+    private let urlField = NSTextField()
+    private var suggestionsView = NSVisualEffectView()
+    private var suggestionsBacking = NSView()
     private let suggestionsStack = NSStackView()
     private var suggestionItems: [(url: String, title: String)] = []
     private var selectedSuggestionIndex: Int = -1
@@ -882,7 +1069,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         window.collectionBehavior.insert(.fullScreenPrimary)
         window.acceptsMouseMovedEvents = true
         window.delegate = self
-        setTrafficLights(visible: false)
+        setTrafficLights(visible: true)
 
         let container = LayoutReportingView(frame: NSRect(origin: .zero, size: contentSize))
         container.onLayout = { [weak self] in self?.layoutOverlays() }
@@ -891,6 +1078,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         webView.frame = container.bounds
         webView.autoresizingMask = [.width, .height]
         webView.onEscape = { [weak self] in self?.escapeToStart() ?? false }
+        webView.onTabCycle = { [weak self] backward in
+            self?.tabManager.cycleMRU(backward: backward)
+            if let tab = self?.tabManager.current {
+                self?.switchToTab(tab)
+            }
+        }
+        webView.onTabSwitch = { [weak self] index in
+            guard let self, index < self.tabManager.count else { return }
+            self.switchToTab(self.tabManager.tabs[index])
+        }
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.allowsBackForwardNavigationGestures = true
@@ -905,7 +1102,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
         container.addSubview(webView, positioned: .below, relativeTo: overlayRoot)
 
-        buildOverlays(in: overlayRoot)
+        buildChrome(in: container)
         observeWebView()
 
         window.center()
@@ -923,6 +1120,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabManager.tabs.append(firstTab)
         tabManager.selectIndex(0)
         tabManager.onTabsChanged = { [weak self] in self?.refreshTabBar() }
+        refreshTabBar()
 
         if let url { navigate(to: url) } else { loadStartPage() }
     }
@@ -937,24 +1135,44 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    private func dimTrafficLights(_ dim: Bool) {
+        for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            window?.standardWindowButton(kind)?.alphaValue = dim ? 0.5 : 1.0
+        }
+    }
+
     private var isFullScreen: Bool { window?.styleMask.contains(.fullScreen) ?? false }
 
     private func installMouseMonitor() {
         mouseMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) { [weak self] event in
             guard let self, event.window === self.window else { return event }
-            if event.type == .mouseMoved {
-                guard let contentView = self.window?.contentView else { return event }
-                let p = event.locationInWindow
-                let nearCorner = p.y > contentView.bounds.height - 44 && p.x < 96
-                self.setTrafficLights(visible: self.isFullScreen || nearCorner)
-                // Tab bar: show when hovering top zone and >1 tab
-                let nearTop = p.y > contentView.bounds.height - 24
-                if nearTop && self.tabManager.count > 1 {
-                    self.showTabBar()
-                }
-            } else if !self.hud.isHidden {
+            if !self.hud.isHidden {
                 let p = self.window!.contentView!.convert(event.locationInWindow, from: nil)
                 if !self.hud.frame.contains(p) { self.hideHUD() }
+            }
+            if event.type == .mouseMoved {
+                let p = self.window!.contentView!.convert(event.locationInWindow, from: nil)
+                let nearTopEdge = p.y > self.window!.contentView!.bounds.height - self.chromeTopHeight - 8
+                let nearLeftCorner = p.x < 96
+                self.dimTrafficLights(!(nearTopEdge || nearLeftCorner))
+
+                // Nav button hover
+                let navBtns = [self.backBtn, self.forwardBtn, self.reloadBtn]
+                let hit = navBtns.first { btn in
+                    let f = btn.convert(btn.bounds, to: nil)
+                    return f.contains(p) && !btn.isHidden
+                }
+                if hit !== self.lastHoveredButton {
+                    self.lastHoveredButton?.layer?.backgroundColor = .clear
+                    self.lastHoveredButton = hit
+                    hit?.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+                }
+            } else if event.type == .leftMouseDown {
+                // Clear nav hover on click
+                if let last = self.lastHoveredButton {
+                    last.layer?.backgroundColor = .clear
+                    self.lastHoveredButton = nil
+                }
             }
             return event
         }
@@ -1064,12 +1282,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let conf = WebViewFactory.makeConfiguration()
         let wv = BrowserWebView(frame: .zero, configuration: conf)
         let tab = Tab(webView: wv)
-        tabManager.tabs.append(tab)
+        if UserDefaults.standard.bool(forKey: "NewTabNextToActive") {
+            let insertIndex = tabManager.currentIndex + 1
+            tabManager.tabs.insert(tab, at: insertIndex)
+        } else {
+            tabManager.tabs.append(tab)
+        }
         switchToTab(tab)
         if let url {
             wv.load(URLRequest(url: url))
         } else {
             loadStartPage()
+            // Blank new tab → drop the caret straight into the address bar so the
+            // user can type immediately (Chrome/Helium behaviour). Deferred: a
+            // freshly-added WKWebView grabs first responder on its first display,
+            // which would otherwise steal focus back the instant we set it.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+                self?.focusURLField()
+            }
         }
     }
 
@@ -1078,15 +1308,68 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             let oldTab = tabManager.tabs.first
             oldTab?.webView.removeFromSuperview()
             let newTab = Tab(webView: BrowserWebView(frame: .zero, configuration: WebViewFactory.makeConfiguration()))
-            tabManager.tabs = [newTab]
-            tabManager.selectIndex(0)
+            tabManager.replaceAll(with: newTab)
             switchToTab(newTab)
             loadStartPage()
             return
         }
-        let prevIndex = max(0, tabManager.currentIndex - 1)
         tabManager.closeCurrent()
-        switchToTab(tabManager.tabs[prevIndex])
+        switchToTab(tabManager.tabs[tabManager.currentIndex])
+    }
+
+    private func updateURLField() {
+        if let url = webView.url, !onStartPage, url.absoluteString != "about:blank" {
+            urlField.stringValue = url.absoluteString
+            // Minimal, centered omnibox (Helium). Focus handlers switch to
+            // left-aligned (.natural) while the user is editing.
+            urlField.alignment = .center
+            let isSecure = url.scheme == "https"
+            locationIcon.image = NSImage(
+                systemSymbolName: isSecure ? "lock.fill" : "globe",
+                accessibilityDescription: isSecure ? "Secure connection" : "Website")
+            locationIcon.contentTintColor = isSecure ? .tertiaryLabelColor : .secondaryLabelColor
+        } else {
+            urlField.stringValue = ""
+            // Helium centers the placeholder on the new-tab omnibox. A centered
+            // paragraph style is required — NSTextField.alignment alone does not
+            // apply to an attributed placeholder string.
+            urlField.alignment = .center
+            urlField.placeholderAttributedString = ChromeFont.placeholder(
+                "Search Google or type a URL",
+                font: ChromeFont.urlField,
+                color: .secondaryLabelColor,
+                alignment: .center)
+            locationIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search")
+            locationIcon.contentTintColor = .secondaryLabelColor
+        }
+    }
+
+    private func centeredLocationBarFrame(windowWidth: CGFloat, toolbarY: CGFloat) -> NSRect {
+        let barH = toolbarHeight - 8
+        let barY = toolbarY + 4
+        let navLeading: CGFloat = 12
+        let navBtnSize: CGFloat = 28
+        let navBtnGap: CGFloat = 2
+        let navWidth = navBtnSize * 3 + navBtnGap * 2
+        let slotX = navLeading + navWidth + 10
+        let slotMaxX = windowWidth - 12
+
+        let reduction: CGFloat
+        if windowWidth >= 1000 { reduction = windowWidth * 0.12 }
+        else if windowWidth >= 800 { reduction = windowWidth * 0.10 }
+        else if windowWidth >= 600 { reduction = windowWidth * 0.05 }
+        else { reduction = 0 }
+
+        let slotWidth = max(260, slotMaxX - slotX)
+        let barWidth = min(centeredLocationBarMaxWidth, max(260, slotWidth - reduction))
+
+        var barX = (windowWidth - barWidth) / 2
+        let minX = slotX
+        let maxX = slotMaxX - barWidth
+        if barX < minX { barX = minX }
+        if barX > maxX { barX = max(minX, (slotX + slotMaxX - barWidth) / 2) }
+
+        return NSRect(x: barX, y: barY, width: barWidth, height: barH)
     }
 
     private func switchToTab(_ tab: Tab) {
@@ -1095,9 +1378,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             current.webView.removeFromSuperview()
         }
         tabManager.select(tab)
+        let chromeTop = chromeTopHeight
+        tab.webView.alphaValue = 0
         container.addSubview(tab.webView, positioned: .below, relativeTo: overlayRoot)
-        tab.webView.frame = container.bounds
-        tab.webView.autoresizingMask = [.width, .height]
+        tab.webView.frame = NSRect(x: 0, y: 0, width: container.bounds.width,
+                                    height: container.bounds.height - chromeTop)
+        tab.webView.autoresizingMask = [.width]
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.12
+            tab.webView.animator().alphaValue = 1
+        }
         webView = tab.webView
         window?.title = tab.title.isEmpty ? "Chromeless" : tab.title
         observations.removeAll()
@@ -1110,81 +1400,97 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 self?.window?.title = t.isEmpty ? "Chromeless" : t
                 self?.refreshTabBar()
             },
-            webView.observe(\.url) { wv, _ in
+            webView.observe(\.url) { [weak self] wv, _ in
                 if let u = wv.url, u.scheme == "https" || u.scheme == "http" {
                     UserDefaults.standard.set(u.absoluteString, forKey: "LastURL")
                 }
+                DispatchQueue.main.async { self?.updateURLField() }
             },
         ]
         webView.navigationDelegate = self
         webView.uiDelegate = self
         webView.onEscape = { [weak self] in self?.escapeToStart() ?? false }
+        webView.onTabCycle = { [weak self] backward in
+            self?.tabManager.cycleMRU(backward: backward)
+            if let tab = self?.tabManager.current {
+                self?.switchToTab(tab)
+            }
+        }
+        webView.onTabSwitch = { [weak self] index in
+            guard let self, index < self.tabManager.count else { return }
+            self.switchToTab(self.tabManager.tabs[index])
+        }
+        updateURLField()
+        backBtn.isEnabled = webView.canGoBack
+        forwardBtn.isEnabled = webView.canGoForward
     }
 
     // MARK: Tab Bar
 
     @objc func toggleTabBar(_ sender: Any?) {
-        if tabBar.isHidden { showTabBar() } else { hideTabBar() }
+        tabBar.isHidden = !tabBar.isHidden
+        layoutOverlays()
     }
 
-    private func showTabBar() {
-        guard tabManager.count > 1 else { return }
-        let shouldAnimate = tabBar.isHidden
-        tabBar.isHidden = false
-        if shouldAnimate {
-            tabBar.alphaValue = 0
-            refreshTabBar()
-            layoutOverlays()
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.15
-                tabBar.animator().alphaValue = 1
-            }
+    /// Attaches a double-click recognizer to a chrome bar so double-clicking an
+    /// empty area behaves like double-clicking a native titlebar. Clicks that
+    /// land on a subview with its own recognizer (tabs, buttons) are unaffected.
+    private func installTitlebarDoubleClick(on view: NSView) {
+        let dbl = NSClickGestureRecognizer(target: self, action: #selector(titlebarDoubleClicked(_:)))
+        dbl.numberOfClicksRequired = 2
+        dbl.delaysPrimaryMouseButtonEvents = false
+        view.addGestureRecognizer(dbl)
+    }
+
+    @objc private func titlebarDoubleClicked(_ sender: NSClickGestureRecognizer) {
+        guard let window = window else { return }
+        // Honour System Settings ▸ Desktop & Dock ▸ "Double-click a window's
+        // title bar to". Default (unset) is Zoom/Maximize.
+        let action = UserDefaults.standard.string(forKey: "AppleActionOnDoubleClick")
+        switch action {
+        case "Minimize":
+            window.miniaturize(nil)
+        case "None":
+            break
+        default: // "Maximize", legacy "Zoom", or unset
+            window.zoom(nil)
         }
-        resetTabBarTimer()
-    }
-
-    private func resetTabBarTimer() {
-        tabBarTimer?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            if !NSMouseInRect(NSEvent.mouseLocation, self.tabBar.frame,
-                              self.window?.isFlipped ?? false) {
-                self.hideTabBar()
-            }
-        }
-        tabBarTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
-    }
-
-    private func hideTabBar() {
-        guard !tabBar.isHidden else { return }
-        NSAnimationContext.runAnimationGroup({ ctx in
-            ctx.duration = 0.3
-            self.tabBar.animator().alphaValue = 0
-        }, completionHandler: { [weak self] in
-            self?.tabBar.isHidden = true
-        })
     }
 
     private func refreshTabBar() {
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        tabItemObservations.removeAll()
+        tabWidthConstraints.removeAll()
+        var tabItems: [TabBarItem] = []
         for (i, tab) in tabManager.tabs.enumerated() {
+            let isSelected = i == tabManager.currentIndex
             let item = TabBarItem(
                 index: i,
                 title: tab.title,
                 favicon: nil,
-                isSelected: i == tabManager.currentIndex,
+                isSelected: isSelected,
+                isLoading: tab.isLoading,
                 target: self,
                 clickAction: #selector(tabItemClicked(_:)),
-                closeAction: #selector(tabItemCloseClicked(_:))
+                closeAction: #selector(tabItemCloseClicked(_:)),
+                secondaryAction: #selector(tabItemContextMenu(_:))
             )
             item.translatesAutoresizingMaskIntoConstraints = false
+            item.layer?.zPosition = isSelected ? 10 : CGFloat(tabItems.count - i)
+            let widthC = item.widthAnchor.constraint(equalToConstant: TabBarItem.maxWidth)
             NSLayoutConstraint.activate([
                 item.heightAnchor.constraint(equalToConstant: 30),
-                item.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
-                item.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+                widthC,
             ])
+            tabWidthConstraints.append(widthC)
             tabStack.addArrangedSubview(item)
+            tabItems.append(item)
+
+            // Observe loading state to update the tab item
+            let loadingObs = tab.webView.observe(\.isLoading) { [weak item] wv, _ in
+                DispatchQueue.main.async { item?.update(loading: wv.isLoading) }
+            }
+            tabItemObservations.append(loadingObs)
 
             if let url = tab.url {
                 FaviconCache.shared.favicon(for: url) { [weak item] img in
@@ -1194,14 +1500,40 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
         let addBtn = NSButton(title: "", target: self, action: #selector(newTabFromBar(_:)))
         addBtn.bezelStyle = .inline
+        addBtn.isBordered = false
         addBtn.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")
         addBtn.contentTintColor = .secondaryLabelColor
+        addBtn.wantsLayer = true
+        addBtn.layer?.cornerRadius = 6
+        addBtn.layer?.cornerCurve = .continuous
         addBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             addBtn.widthAnchor.constraint(equalToConstant: 28),
             addBtn.heightAnchor.constraint(equalToConstant: 28),
         ])
         tabStack.addArrangedSubview(addBtn)
+
+        tabItemViews = tabItems
+        updateTabWidths()
+        updateURLField()
+        backBtn.isEnabled = webView.canGoBack
+        forwardBtn.isEnabled = webView.canGoForward
+    }
+
+    /// Helium/Chrome behaviour: tabs stretch to share the available width
+    /// (up to a per-tab max) when there are few, and shrink toward the min as
+    /// more tabs are opened.
+    private func updateTabWidths() {
+        let count = tabItemViews.count
+        guard count > 0 else { return }
+        let addBtnWidth: CGFloat = 28
+        let gap: CGFloat = 4
+        let rightInset: CGFloat = 8
+        // gaps: one between each of the `count` tabs and the trailing "+" button.
+        let totalGaps = gap * CGFloat(count)
+        let avail = tabBar.bounds.width - trafficLightInset - rightInset - addBtnWidth - totalGaps
+        let per = min(TabBarItem.maxWidth, max(TabBarItem.minWidth, floor(avail / CGFloat(count))))
+        for c in tabWidthConstraints { c.constant = per }
     }
 
     @objc private func tabItemClicked(_ sender: NSClickGestureRecognizer) {
@@ -1214,14 +1546,66 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     @objc private func tabItemCloseClicked(_ sender: NSButton) {
         let idx = sender.tag
         guard idx < tabManager.count else { return }
+        let tab = tabManager.tabs[idx]
         if tabManager.count == 1 {
             window?.close()
         } else {
-            let prevIndex = max(0, idx - 1)
-            tabManager.closeCurrent()
-            switchToTab(tabManager.tabs[prevIndex])
-            refreshTabBar()
+            tabManager.close(tab)
+            switchToTab(tabManager.tabs[tabManager.currentIndex])
         }
+    }
+
+    @objc private func tabItemContextMenu(_ sender: NSClickGestureRecognizer) {
+        guard let item = sender.view as? TabBarItem else { return }
+        guard item.index < tabManager.count else { return }
+        let tab = tabManager.tabs[item.index]
+        let menu = tabContextMenu(for: tab)
+        let point = NSPoint(x: item.bounds.midX, y: 0)
+        menu.popUp(positioning: nil, at: point, in: item)
+    }
+
+    private func tabContextMenu(for tab: Tab) -> NSMenu {
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Duplicate", action: #selector(duplicateTab(_:)), keyEquivalent: "")
+            .representedObject = tab
+        let copyItem = menu.addItem(withTitle: "Copy URL", action: #selector(copyTabURL(_:)), keyEquivalent: "")
+        copyItem.representedObject = tab
+        menu.addItem(.separator())
+        menu.addItem(withTitle: "Close Tab", action: #selector(closeTabFromContext(_:)), keyEquivalent: "w")
+            .representedObject = tab
+        let closeOthers = menu.addItem(withTitle: "Close Other Tabs", action: #selector(closeOtherTabs(_:)), keyEquivalent: "")
+        closeOthers.representedObject = tab
+        return menu
+    }
+
+    @objc private func duplicateTab(_ sender: NSMenuItem) {
+        guard let tab = sender.representedObject as? Tab else { return }
+        newTab(url: tab.url)
+    }
+
+    @objc private func copyTabURL(_ sender: NSMenuItem) {
+        guard let tab = sender.representedObject as? Tab, let url = tab.url else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.absoluteString, forType: .string)
+        showToast("URL copied")
+    }
+
+    @objc private func closeTabFromContext(_ sender: NSMenuItem) {
+        guard let tab = sender.representedObject as? Tab else { return }
+        if tabManager.count == 1 {
+            window?.close()
+            return
+        }
+        tabManager.close(tab)
+        switchToTab(tabManager.tabs[tabManager.currentIndex])
+    }
+
+    @objc private func closeOtherTabs(_ sender: NSMenuItem) {
+        guard let keepTab = sender.representedObject as? Tab else { return }
+        let toClose = tabManager.tabs.filter { $0.id != keepTab.id }
+        for tab in toClose { tab.webView.removeFromSuperview() }
+        tabManager.closeAll(except: keepTab)
+        switchToTab(keepTab)
     }
 
     @objc private func newTabFromBar(_ sender: Any?) {
@@ -1234,10 +1618,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         for item in DownloadManager.shared.items.reversed() {
             let row = NSView()
             let label = NSTextField(labelWithString: item.filename)
-            label.font = .systemFont(ofSize: 12)
+            label.font = ChromeFont.downloadTitle
             label.lineBreakMode = .byTruncatingMiddle
             let statusLabel = NSTextField(labelWithString: item.status == .completed ? "✓" : "\(item.receivedBytes)")
-            statusLabel.font = .systemFont(ofSize: 11)
+            statusLabel.font = ChromeFont.downloadStatus
             statusLabel.textColor = .secondaryLabelColor
             row.addSubview(label)
             row.addSubview(statusLabel)
@@ -1249,11 +1633,100 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         layoutOverlays()
     }
 
-    private func buildOverlays(in container: NSView) {
+    private func buildChrome(in container: NSView) {
         progressBar.wantsLayer = true
         progressBar.layer?.backgroundColor = NSColor.controlAccentColor.cgColor
         progressBar.alphaValue = 0
         container.addSubview(progressBar)
+
+        toolbarBar.material = .headerView
+        toolbarBar.blendingMode = .withinWindow
+        toolbarBar.state = .active
+        toolbarBar.wantsLayer = true
+        toolbarBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 0.94).cgColor
+        container.addSubview(toolbarBar)
+        // NB: no double-click recognizer on the toolbar — it holds the editable
+        // URL field, and an ancestor recognizer swallows the click that focuses
+        // it. Zoom-on-double-click lives on the tab bar (the titlebar row) only.
+
+        let navBtnConfig: (NSButton, String, Selector) -> Void = { btn, symbol, action in
+            btn.wantsLayer = true
+            btn.bezelStyle = .inline
+            btn.isBordered = false
+            btn.image = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)
+            btn.contentTintColor = .secondaryLabelColor
+            btn.target = self
+            btn.action = action
+            btn.layer?.cornerRadius = 6
+            btn.layer?.cornerCurve = .continuous
+            self.toolbarBar.addSubview(btn)
+        }
+        navBtnConfig(backBtn, "chevron.left", #selector(goBackAction(_:)))
+        backBtn.isEnabled = false
+        navBtnConfig(forwardBtn, "chevron.right", #selector(goForwardAction(_:)))
+        forwardBtn.isEnabled = false
+        navBtnConfig(reloadBtn, "arrow.clockwise", #selector(reloadPage(_:)))
+
+        locationBar.wantsLayer = true
+        locationBar.material = .contentBackground
+        locationBar.blendingMode = .withinWindow
+        locationBar.state = .active
+        locationBar.layer?.cornerRadius = 8
+        locationBar.layer?.cornerCurve = .continuous
+        locationBar.layer?.masksToBounds = true
+        locationBar.layer?.borderWidth = 0.5
+        locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+        locationBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.17, alpha: 1).cgColor
+        container.addSubview(locationBar)
+
+        locationIcon.imageScaling = .scaleProportionallyDown
+        locationIcon.contentTintColor = .secondaryLabelColor
+        locationBar.addSubview(locationIcon)
+
+        urlField.isBezeled = false
+        urlField.isBordered = false
+        urlField.drawsBackground = false
+        urlField.focusRingType = .none
+        urlField.font = ChromeFont.urlField
+        urlField.textColor = .labelColor
+        urlField.placeholderAttributedString = ChromeFont.placeholder(
+            "Search Google or type a URL",
+            font: ChromeFont.urlField,
+            color: .secondaryLabelColor)
+        urlField.usesSingleLineMode = true
+        urlField.cell?.isScrollable = true
+        urlField.cell?.wraps = false
+        urlField.delegate = self
+        urlField.lineBreakMode = .byTruncatingHead
+        (urlField.cell as? NSTextFieldCell)?.truncatesLastVisibleLine = true
+        locationBar.addSubview(urlField)
+
+        // Click anywhere in the pill to focus the URL field. Native click-to-focus
+        // is unreliable here (movable-by-background window + the field not filling
+        // the whole pill), so drive it explicitly. The delegate lets clicks fall
+        // through to the field editor once editing has begun (cursor placement).
+        let pillClick = NSClickGestureRecognizer(target: self, action: #selector(locationBarClicked(_:)))
+        pillClick.delegate = self
+        locationBar.addGestureRecognizer(pillClick)
+
+        tabBarSeparator.wantsLayer = true
+        tabBarSeparator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.35).cgColor
+        container.addSubview(tabBarSeparator)
+
+        tabBar.material = .headerView
+        tabBar.blendingMode = .withinWindow
+        tabBar.state = .active
+        tabBar.wantsLayer = true
+        tabBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 0.92).cgColor
+        container.addSubview(tabBar)
+        installTitlebarDoubleClick(on: tabBar)
+
+        tabStack.orientation = .horizontal
+        tabStack.spacing = 4
+        tabStack.alignment = .bottom
+        tabStack.edgeInsets = NSEdgeInsets(top: 4, left: trafficLightInset, bottom: 0, right: 8)
+        tabStack.translatesAutoresizingMaskIntoConstraints = false
+        tabBar.addSubview(tabStack)
 
         hud.material = .hudWindow
         hud.blendingMode = .withinWindow
@@ -1276,11 +1749,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         hudField.isBordered = false
         hudField.drawsBackground = false
         hudField.focusRingType = .none
-        hudField.font = .systemFont(ofSize: 16)
+        hudField.font = ChromeFont.hudField
         hudField.textColor = NSColor(calibratedWhite: 0.95, alpha: 1)
-        hudField.placeholderAttributedString = NSAttributedString(
-            string: "Search or enter address",
-            attributes: [.foregroundColor: NSColor(calibratedWhite: 0.55, alpha: 1)])
+        hudField.placeholderAttributedString = ChromeFont.placeholder(
+            "Search Google or type a URL",
+            font: ChromeFont.hudField,
+            color: NSColor(calibratedWhite: 0.55, alpha: 1))
         hudField.usesSingleLineMode = true
         hudField.cell?.isScrollable = true
         hudField.cell?.wraps = false
@@ -1297,7 +1771,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         toastView.layer?.masksToBounds = true
         toastView.isHidden = true
         toastView.alphaValue = 0
-        toastLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        toastLabel.font = ChromeFont.toast
         toastLabel.textColor = .labelColor
         toastView.addSubview(toastLabel)
         container.addSubview(toastView)
@@ -1324,16 +1798,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         findField.isBordered = false
         findField.drawsBackground = false
         findField.focusRingType = .none
-        findField.font = .systemFont(ofSize: 14)
+        findField.font = ChromeFont.findField
         findField.textColor = .labelColor
-        findField.placeholderString = "Find"
+        findField.placeholderAttributedString = ChromeFont.placeholder(
+            "Find", font: ChromeFont.findField, color: .secondaryLabelColor)
         findField.usesSingleLineMode = true
         findField.cell?.isScrollable = true
         findField.cell?.wraps = false
         findField.delegate = self
         findBar.addSubview(findField)
 
-        findStatusLabel.font = .systemFont(ofSize: 12)
+        findStatusLabel.font = ChromeFont.findStatus
         findStatusLabel.textColor = .secondaryLabelColor
         findBar.addSubview(findStatusLabel)
 
@@ -1403,31 +1878,50 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
         suggestionsView.addSubview(suggestionsStack)
         container.addSubview(suggestionsView)
-
-        tabBar.material = .hudWindow
-        tabBar.blendingMode = .withinWindow
-        tabBar.state = .active
-        tabBar.wantsLayer = true
-        tabBar.layer?.cornerRadius = 18
-        tabBar.layer?.cornerCurve = .continuous
-        tabBar.layer?.masksToBounds = true
-        tabBar.layer?.borderWidth = 1
-        tabBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
-        tabBar.isHidden = true
-        tabBar.alphaValue = 0
-
-        tabStack.orientation = .horizontal
-        tabStack.spacing = 2
-        tabStack.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
-        tabBar.addSubview(tabStack)
-
-        container.addSubview(tabBar)
     }
 
     private func layoutOverlays() {
         guard let contentView = window?.contentView else { return }
         overlayRoot.frame = contentView.bounds
         let b = overlayRoot.bounds
+        let chromeTop = chromeTopHeight
+
+        let toolbarY = b.height - tabBarHeight - toolbarHeight + tabToolbarOverlap
+        toolbarBar.frame = NSRect(x: 0, y: toolbarY, width: b.width, height: toolbarHeight)
+
+        tabBar.frame = NSRect(x: 0, y: b.height - tabBarHeight, width: b.width, height: tabBarHeight)
+        tabStack.frame = tabBar.bounds
+        updateTabWidths()
+        tabBarSeparator.frame = NSRect(x: 0, y: toolbarY + toolbarHeight - 1, width: b.width, height: 1)
+
+        let navBtnSize: CGFloat = 28
+        let navPad: CGFloat = 12
+        let navBtnGap: CGFloat = 2
+        var navX = navPad
+        for btn in [backBtn, forwardBtn, reloadBtn] {
+            btn.frame = NSRect(x: navX, y: (toolbarHeight - navBtnSize) / 2,
+                               width: navBtnSize, height: navBtnSize)
+            navX += navBtnSize + navBtnGap
+        }
+
+        locationBar.frame = centeredLocationBarFrame(windowWidth: b.width, toolbarY: toolbarY)
+
+        let iconSize: CGFloat = 14
+        let iconPad: CGFloat = 10
+        locationIcon.frame = NSRect(x: iconPad, y: (locationBar.frame.height - iconSize) / 2,
+                                    width: iconSize, height: iconSize)
+        // Symmetric left/right margins so centered text lands on the pill's
+        // centre; fixed height, vertically centred (an editable NSTextField does
+        // not vertically centre its text inside a taller frame).
+        let urlX = iconPad + iconSize + 6
+        let fieldH = ceil(ChromeFont.urlField.boundingRectForFont.height) + 4
+        let fieldY = (locationBar.frame.height - fieldH) / 2
+        urlField.frame = NSRect(x: urlX, y: fieldY,
+                                width: max(0, locationBar.frame.width - urlX * 2),
+                                height: fieldH)
+
+        webView.frame = NSRect(x: 0, y: 0, width: b.width, height: b.height - chromeTop)
+
         hudW = min(620, max(280, b.width - 48))
         let hudH: CGFloat = 52
         hud.frame = NSRect(x: (b.width - hudW) / 2, y: b.height - hudH - 84, width: hudW, height: hudH)
@@ -1441,7 +1935,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         toastView.frame = NSRect(x: (b.width - tw) / 2, y: 28, width: tw, height: th)
         toastLabel.frame = NSRect(x: 16, y: (th - ts.height) / 2, width: ts.width, height: ts.height)
 
-        progressBar.frame = NSRect(x: 0, y: b.height - 2, width: b.width * lastProgress, height: 2)
+        progressBar.frame = NSRect(x: 0, y: b.height - chromeTop, width: b.width * lastProgress, height: 2)
 
         let fbW: CGFloat = 360
         let fbH: CGFloat = 40
@@ -1476,20 +1970,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
 
         if !suggestionsView.isHidden {
-            let svW = hudW
             let svH = CGFloat(min(suggestionItems.count, 8)) * 32 + 8
-            suggestionsView.frame = NSRect(x: hud.frame.minX, y: hud.frame.minY - svH - 4,
-                                            width: svW, height: svH)
+            let svW: CGFloat
+            let svX: CGFloat
+            let svY: CGFloat
+            if !hud.isHidden {
+                svW = hudW
+                svX = hud.frame.minX
+                svY = hud.frame.minY - svH - 4
+            } else {
+                svW = locationBar.frame.width
+                svX = locationBar.frame.minX
+                svY = locationBar.frame.minY - svH - 4
+            }
+            suggestionsView.frame = NSRect(x: svX, y: svY, width: svW, height: svH)
             suggestionsBacking.frame = suggestionsView.bounds
             suggestionsStack.frame = suggestionsView.bounds.insetBy(dx: 4, dy: 4)
-        }
-
-        if !tabBar.isHidden && tabManager.count > 1 {
-            let tbW = min(600, max(200, CGFloat(tabManager.count) * 160 + 40))
-            let tbH: CGFloat = 36
-            tabBar.frame = NSRect(x: (b.width - tbW) / 2, y: b.height - tbH - 8,
-                                   width: tbW, height: tbH)
-            tabStack.frame = tabBar.bounds
         }
     }
 
@@ -1503,9 +1999,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 self?.window?.title = t.isEmpty ? "Chromeless" : t
                 self?.refreshTabBar()
             },
-            webView.observe(\.url) { wv, _ in
+            webView.observe(\.url) { [weak self] wv, _ in
                 if let u = wv.url, u.scheme == "https" || u.scheme == "http" {
                     UserDefaults.standard.set(u.absoluteString, forKey: "LastURL")
+                }
+                DispatchQueue.main.async {
+                    self?.updateURLField()
+                    self?.backBtn.isEnabled = wv.canGoBack
+                    self?.forwardBtn.isEnabled = wv.canGoForward
                 }
             },
         ]
@@ -1538,11 +2039,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         } else {
             webView.load(URLRequest(url: url))
         }
+        updateURLField()
     }
 
     func loadStartPage() {
         onStartPage = true
         webView.loadHTMLString(startPageHTML, baseURL: nil)
+        updateURLField()
     }
 
     private func escapeToStart() -> Bool {
@@ -1583,6 +2086,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         })
     }
 
+    @objc private func locationBarClicked(_ sender: NSClickGestureRecognizer) {
+        focusURLField()
+    }
+
+    // Only claim the click to focus when the field is not already being edited;
+    // once the field editor is active, decline so clicks reach it for cursor
+    // placement and text selection.
+    func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
+                           shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
+        if gestureRecognizer.view === locationBar {
+            return urlField.currentEditor() == nil
+        }
+        return true
+    }
+
+    func focusURLField() {
+        updateURLField()
+        if urlField.stringValue.isEmpty {
+            urlField.alignment = .natural
+        }
+        locationBar.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
+        locationBar.layer?.borderWidth = 1
+        window?.makeFirstResponder(urlField)
+        urlField.selectText(nil)
+    }
+
     private func commitHUD() {
         let text = hudField.stringValue
         hideHUD()
@@ -1597,6 +2126,35 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 findNext(nil)
+                return true
+            }
+            return false
+        }
+        if control == urlField {
+            if commandSelector == #selector(NSResponder.moveUp(_:)) {
+                if selectedSuggestionIndex > 0 { selectedSuggestionIndex -= 1; highlightSuggestion() }
+                return true
+            }
+            if commandSelector == #selector(NSResponder.moveDown(_:)) {
+                if selectedSuggestionIndex < suggestionItems.count - 1 { selectedSuggestionIndex += 1; highlightSuggestion() }
+                return true
+            }
+            if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                window?.makeFirstResponder(webView)
+                updateURLField()
+                suggestionsView.isHidden = true
+                selectedSuggestionIndex = -1
+                return true
+            }
+            if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+                if selectedSuggestionIndex >= 0 && selectedSuggestionIndex < suggestionItems.count {
+                    let item = suggestionItems[selectedSuggestionIndex]
+                    suggestionsView.isHidden = true
+                    selectedSuggestionIndex = -1
+                    if let url = URL(string: item.url) { navigate(to: url) }
+                } else {
+                    commitURLField()
+                }
                 return true
             }
             return false
@@ -1626,6 +2184,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         return false
     }
 
+    func controlTextDidBeginEditing(_ obj: Notification) {
+        if obj.object as? NSTextField == urlField {
+            urlField.alignment = .natural
+            locationBar.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
+            locationBar.layer?.borderWidth = 1
+        }
+    }
+
+    func controlTextDidEndEditing(_ obj: Notification) {
+        if obj.object as? NSTextField == urlField {
+            locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            locationBar.layer?.borderWidth = 0.5
+            if onStartPage && urlField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
+                updateURLField()
+            }
+        }
+    }
+
     func controlTextDidChange(_ obj: Notification) {
         if obj.object as? NSTextField == findField {
             NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(runFind), object: nil)
@@ -1633,7 +2209,61 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         } else if obj.object as? NSTextField == hudField {
             NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(updateSuggestions), object: nil)
             perform(#selector(updateSuggestions), with: nil, afterDelay: 0.15)
+        } else if obj.object as? NSTextField == urlField {
+            NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(updateURLSuggestions), object: nil)
+            perform(#selector(updateURLSuggestions), with: nil, afterDelay: 0.15)
         }
+    }
+
+    private func commitURLField() {
+        let text = urlField.stringValue
+        window?.makeFirstResponder(webView)
+        suggestionsView.isHidden = true
+        if let url = smartURL(text) {
+            navigate(to: url)
+        } else if onStartPage && text.trimmingCharacters(in: .whitespaces).isEmpty {
+            updateURLField()
+        }
+    }
+
+    @objc private func updateURLSuggestions() {
+        let text = urlField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard text.count >= 2 else {
+            suggestionsView.isHidden = true
+            return
+        }
+        suggestionItems = HistoryStore.shared.search(query: text)
+        guard !suggestionItems.isEmpty else {
+            suggestionsView.isHidden = true
+            return
+        }
+        suggestionsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        selectedSuggestionIndex = -1
+        for (i, item) in suggestionItems.prefix(8).enumerated() {
+            let row = SuggestionRow(index: i, target: self, action: #selector(urlSuggestionRowClicked(_:)))
+            let titleLabel = NSTextField(labelWithString: item.title.isEmpty ? item.url : item.title)
+            titleLabel.font = ChromeFont.suggestionTitle
+            titleLabel.lineBreakMode = .byTruncatingMiddle
+            let urlLabel = NSTextField(labelWithString: item.url)
+            urlLabel.font = ChromeFont.suggestionURL
+            urlLabel.textColor = .tertiaryLabelColor
+            row.addSubview(titleLabel)
+            row.addSubview(urlLabel)
+            titleLabel.frame = NSRect(x: 12, y: 14, width: urlField.frame.width - 24, height: 16)
+            urlLabel.frame = NSRect(x: 12, y: 0, width: urlField.frame.width - 24, height: 14)
+            row.frame = NSRect(x: 0, y: 0, width: urlField.frame.width, height: 32)
+            suggestionsStack.addArrangedSubview(row)
+        }
+        suggestionsView.isHidden = false
+        layoutOverlays()
+    }
+
+    @objc private func urlSuggestionRowClicked(_ sender: SuggestionRow) {
+        guard sender.index < suggestionItems.count else { return }
+        let item = suggestionItems[sender.index]
+        suggestionsView.isHidden = true
+        window?.makeFirstResponder(webView)
+        if let url = URL(string: item.url) { navigate(to: url) }
     }
 
     @objc private func updateSuggestions() {
@@ -1652,10 +2282,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         for (i, item) in suggestionItems.prefix(8).enumerated() {
             let row = SuggestionRow(index: i, target: self, action: #selector(suggestionRowClicked(_:)))
             let titleLabel = NSTextField(labelWithString: item.title.isEmpty ? item.url : item.title)
-            titleLabel.font = .systemFont(ofSize: 13)
+            titleLabel.font = ChromeFont.hudSuggestionTitle
             titleLabel.lineBreakMode = .byTruncatingMiddle
             let urlLabel = NSTextField(labelWithString: item.url)
-            urlLabel.font = .systemFont(ofSize: 11)
+            urlLabel.font = ChromeFont.hudSuggestionURL
             urlLabel.textColor = .tertiaryLabelColor
             row.addSubview(titleLabel)
             row.addSubview(urlLabel)
@@ -1735,7 +2365,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     // MARK: Menu actions
 
-    @objc func openLocation(_ sender: Any?) { showHUD() }
+    @objc func openLocation(_ sender: Any?) { focusURLField() }
 
     @objc func reloadPage(_ sender: Any?) {
         if onStartPage { loadStartPage() } else { webView.reload() }
@@ -1745,8 +2375,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if onStartPage { loadStartPage() } else { webView.reloadFromOrigin() }
     }
 
-    @objc func goBackAction(_ sender: Any?) { webView.goBack() }
-    @objc func goForwardAction(_ sender: Any?) { webView.goForward() }
+    @objc func goBackAction(_ sender: Any?) { webView.goBack(); updateURLField() }
+    @objc func goForwardAction(_ sender: Any?) { webView.goForward(); updateURLField() }
 
     @objc func zoomInPage(_ sender: Any?) { webView.pageZoom = min(webView.pageZoom * 1.1, 5.0) }
     @objc func zoomOutPage(_ sender: Any?) { webView.pageZoom = max(webView.pageZoom / 1.1, 0.25) }
@@ -1928,6 +2558,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        UserDefaults.standard.register(defaults: ["NewTabNextToActive": true])
         buildMenu()
 
         let urlsToRestore: [URL] = {
@@ -1977,7 +2608,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func newWindow(_ sender: Any?) { openWindow(url: nil) }
 
     @objc func openLocation(_ sender: Any?) {
-        (NSApp.keyWindow?.windowController as? BrowserWindowController)?.showHUD()
+        (NSApp.keyWindow?.windowController as? BrowserWindowController)?.focusURLField()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
