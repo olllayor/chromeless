@@ -18,7 +18,9 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 | Bar height | 36 pt | Full width of window |
 | Traffic light inset | 78 pt | Left padding for tabs to clear window controls |
 | Right inset | 8 pt | Padding before edge |
-| Top inset | 4 pt | Clearance above tabs |
+| Top inset (active tab) | 4 pt | Clearance above 30 pt active tab |
+| Top inset (inactive tab) | 6 pt | Clearance above 28 pt inactive tab |
+| Bottom margin | 2 pt | Applied uniformly below all tabs to satisfy bottom-alignment |
 
 ### 2.2 Tab Items
 
@@ -53,8 +55,8 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Favicon:** 14×14 pt, left-aligned, 10 pt from leading edge
 - **Loading spinner:** Replaces favicon frame while page is loading (NSProgressIndicator, `.spinning` style, small control size)
 - **Title:** Single line, `.byTruncatingTail` ellipsis at min-width floor
-- **Close button:** 16×16 pt SF Symbol `xmark` / `xmark.circle.fill`.
-  - **Favicon→Close swap:** Favicon visible by default. On hover: favicon is hidden and close button appears in its place (reusing same frame). Loading spinner hides on hover too.
+- **Close button:** 14×14 pt SF Symbol `xmark` / `xmark.circle.fill` — **same size as favicon** to enable zero-layout-delta swap.
+  - **Favicon→Close swap:** Favicon visible by default. On hover: favicon is hidden and close button appears in its place (same 14×14 frame, true 1:1 replacement). Loading spinner hides on hover too.
   - Visibility: visible on active tabs and hovered inactive tabs.
   - Icon: `xmark.circle.fill` (filled circle) for active tab, `xmark` (thin) for inactive/hovered.
 - **Spacing:** 5 pt gap between favicon and title; 8 pt padding on each side.
@@ -110,7 +112,7 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Max width:** 560 pt
 - **Min width:** 200 pt
 - **Height:** 32 pt
-- **Corner radius:** 18 pt (fully rounded pill shape)
+- **Corner radius:** 16 pt (fully rounded pill shape — half of 32 pt height, the geometric maximum for stadium rounding)
 - **Background:** `#1c1c28`
 - **Border:** 0.5 pt, `rgba(255,255,255,0.08)`
 - **Elevation:** `0 1px 4px rgba(0,0,0,0.3)` box shadow
@@ -127,7 +129,7 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Security icon:** `lock.fill` (HTTPS, `.tertiaryLabelColor`) or `globe` (HTTP, `.secondaryLabelColor`) or `magnifyingglass` (search/start page, `.secondaryLabelColor`)
 - **URL text:** 12 pt, `.labelColor`, `.byTruncatingHead` line break mode
 - **Background when not editing:** Transparent (the pill itself provides the background)
-- **Background when editing:** `#1c1c28` active state, slight border glow (`controlAccentColor` at 40% opacity, 1 pt)
+- **Edit state:** Signaled by border glow only (`controlAccentColor` at 40% opacity, 1 pt border). Background unchanged — the text field is always transparent and the pill's resting background (`#1c1c28`) provides the base.
 - **Right-side action button:** Bookmark star (SF Symbol `star`) — optional, shows `.secondaryLabelColor` when not bookmarked, `.systemYellow` when bookmarked
 - **Separator lines:** 1 pt vertical dividers at `rgba(255,255,255,0.06)` between nav buttons and pill, and optionally between URL field and right action button
 
