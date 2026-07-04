@@ -1128,21 +1128,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func showTabBar() {
-        guard tabBar.isHidden, tabManager.count > 1 else { return }
+        guard tabManager.count > 1 else { return }
+        let shouldAnimate = tabBar.isHidden
         tabBar.isHidden = false
-        tabBar.alphaValue = 0
-        refreshTabBar()
-        layoutOverlays()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            tabBar.animator().alphaValue = 1
+        if shouldAnimate {
+            tabBar.alphaValue = 0
+            refreshTabBar()
+            layoutOverlays()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.15
+                tabBar.animator().alphaValue = 1
+            }
         }
+        resetTabBarTimer()
+    }
+
+    private func resetTabBarTimer() {
         tabBarTimer?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            self?.hideTabBar()
+            guard let self else { return }
+            if !NSMouseInRect(NSEvent.mouseLocation, self.tabBar.frame,
+                              self.window?.isFlipped ?? false) {
+                self.hideTabBar()
+            }
         }
         tabBarTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
 
     private func hideTabBar() {
