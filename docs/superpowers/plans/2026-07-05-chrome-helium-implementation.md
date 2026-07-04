@@ -96,21 +96,21 @@ func updateAppearance() {
         layer?.backgroundColor = pageBG.cgColor
         closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close tab")
         closeButton.contentTintColor = .secondaryLabelColor
-        titleLabel.textColor = .labelColor
+        titleLabel.textColor = .labelColor                              // #ffffff
         closeButton.isHidden = false
         faviconView.isHidden = false
     } else if isHovered {
         layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
         closeButton.contentTintColor = .tertiaryLabelColor
-        titleLabel.textColor = .secondaryLabelColor
-        faviconView.isHidden = true    // swap favicon → close
+        titleLabel.textColor = NSColor(calibratedWhite: 0.8, alpha: 1)  // #cccccc — distinct from default
+        faviconView.isHidden = true                                     // hide favicon to reduce visual noise
         closeButton.isHidden = false
     } else {
         layer?.backgroundColor = NSColor.clear.cgColor
         closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
         closeButton.contentTintColor = .tertiaryLabelColor
-        titleLabel.textColor = .secondaryLabelColor
+        titleLabel.textColor = NSColor(calibratedWhite: 0.6, alpha: 1)  // #999999 — dimmest tier
         faviconView.isHidden = false
         closeButton.isHidden = true
     }
@@ -204,7 +204,7 @@ Change the tab item height to 28 for inactive, and keep 30 for active by modifyi
 NSLayoutConstraint.activate([
     item.heightAnchor.constraint(equalToConstant: isSelected ? 30 : 28),
     item.widthAnchor.constraint(greaterThanOrEqualToConstant: 100),   // was 120
-    item.widthAnchor.constraint(lessThanOrEqualToConstant: 240),
+    item.widthAnchor.constraint(lessThanOrEqualToConstant: 220),   // was 240
 ])
 ```
 
@@ -311,8 +311,8 @@ locationBar.layer?.cornerRadius = 16              // was 8 — max for 32pt heig
 locationBar.layer?.cornerCurve = .continuous
 locationBar.layer?.masksToBounds = true
 locationBar.layer?.borderWidth = 0.5
-locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
-locationBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.11, alpha: 1).cgColor
+locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
+locationBar.layer?.backgroundColor = NSColor(calibratedRed: 28/255, green: 28/255, blue: 40/255, alpha: 1).cgColor  // #1c1c28 — cool blue tint
 // Add shadow
 locationBar.shadow = NSShadow()
 locationBar.layer?.shadowColor = NSColor.black.withAlphaComponent(0.3).cgColor
@@ -340,7 +340,7 @@ In `controlTextDidEndEditing(_:)`:
 func controlTextDidEndEditing(_ obj: Notification) {
     if obj.object as? NSTextField == urlField {
         locationBar.layer?.borderWidth = 0.5
-        locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.10).cgColor
+        locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
     }
 }
 ```

@@ -55,9 +55,9 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Favicon:** 14×14 pt, left-aligned, 10 pt from leading edge
 - **Loading spinner:** Replaces favicon frame while page is loading (NSProgressIndicator, `.spinning` style, small control size)
 - **Title:** Single line, `.byTruncatingTail` ellipsis at min-width floor
-- **Close button:** 14×14 pt SF Symbol `xmark` / `xmark.circle.fill` — **same size as favicon** to enable zero-layout-delta swap.
-  - **Favicon→Close swap:** Favicon visible by default. On hover: favicon is hidden and close button appears in its place (same 14×14 frame, true 1:1 replacement). Loading spinner hides on hover too.
-  - Visibility: visible on active tabs and hovered inactive tabs.
+- **Close button:** 14×14 pt SF Symbol `xmark` / `xmark.circle.fill` — same size as favicon.
+  - **Favicon→Close reveal:** Favicon visible by default at the left edge. Close button sits at the right edge (Chrome/Firefox/Safari convention). On hover: favicon is hidden (avoids visual crowding) and close button becomes visible at its own right-side position. No frame sharing — the two elements have independent, fixed positions. Loading spinner hides on hover too.
+  - Visibility: Close visible on active tabs always; on inactive tabs, visible only on hover.
   - Icon: `xmark.circle.fill` (filled circle) for active tab, `xmark` (thin) for inactive/hovered.
 - **Spacing:** 5 pt gap between favicon and title; 8 pt padding on each side.
 
@@ -113,7 +113,7 @@ Redesign the Chromeless browser chrome to adopt a Helium-inspired aesthetic: pil
 - **Min width:** 200 pt
 - **Height:** 32 pt
 - **Corner radius:** 16 pt (fully rounded pill shape — half of 32 pt height, the geometric maximum for stadium rounding)
-- **Background:** `#1c1c28`
+- **Background:** `#1c1c28` (R28/G28/B40 — cool blue tint, not neutral gray)
 - **Border:** 0.5 pt, `rgba(255,255,255,0.08)`
 - **Elevation:** `0 1px 4px rgba(0,0,0,0.3)` box shadow
 
