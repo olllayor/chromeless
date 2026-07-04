@@ -4,3 +4,5 @@ build/
 *.provisionprofile
 .DS_Store
 plan/
+chromeless
+docs/
