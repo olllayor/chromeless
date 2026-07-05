@@ -16,11 +16,15 @@ fi
 
 echo "▸ compiling ($ARCH)"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+# Whole-module build: all sources compile together into one module (no imports
+# between them, `internal` visible everywhere). main.swift holds the top-level
+# boot statements; the rest are grouped by concern under App/ Core/ Browser/ …
+SOURCES=(main.swift App/*.swift Core/*.swift Browser/*.swift Security/*.swift Autofill/*.swift Data/*.swift Settings/*.swift)
 swiftc -O -swift-version 5 \
   -target "$ARCH-apple-macos13.0" \
-  main.swift \
+  "${SOURCES[@]}" \
   -o "$APP/Contents/MacOS/Chromeless" \
-  -framework Cocoa -framework WebKit
+  -framework Cocoa -framework WebKit -framework CoreLocation
 
 cp Chromeless.icns "$APP/Contents/Resources/Chromeless.icns"
 cat > "$APP/Contents/Info.plist" <<'PLIST'
@@ -43,6 +47,12 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <key>NSAppTransportSecurity</key>
   <dict><key>NSAllowsArbitraryLoads</key><true/></dict>
+  <!-- TCC purpose strings. macOS SIGKILLs the app the instant WebKit touches
+       the camera/mic/location without these, so they are mandatory for site
+       permissions to function. -->
+  <key>NSCameraUsageDescription</key><string>Chromeless lets websites you allow use your camera.</string>
+  <key>NSMicrophoneUsageDescription</key><string>Chromeless lets websites you allow use your microphone.</string>
+  <key>NSLocationWhenInUseUsageDescription</key><string>Chromeless lets websites you allow access your location.</string>
   <key>NSHumanReadableCopyright</key><string>chromeless — the browser that isn’t there</string>
 </dict>
 </plist>
