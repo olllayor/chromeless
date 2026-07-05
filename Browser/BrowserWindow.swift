@@ -472,6 +472,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             loadStartPage()
             return
         }
+        // Pull the dying web view out of the hierarchy explicitly — switchToTab
+        // only removes the *new* current tab's view (a no-op), so without this
+        // the closed tab's view (and its WebContent process) leaks in the
+        // container, hidden under the next tab.
+        tabManager.current?.webView.removeFromSuperview()
         tabManager.closeCurrent()
         switchToTab(tabManager.tabs[tabManager.currentIndex])
     }
@@ -1040,6 +1045,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if tabManager.count == 1 {
             window?.close()
         } else {
+            tab.webView.removeFromSuperview()   // see closeCurrentTab — avoids a leaked pane
             tabManager.close(tab)
             switchToTab(tabManager.tabs[tabManager.currentIndex])
         }
@@ -1108,6 +1114,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             window?.close()
             return
         }
+        tab.webView.removeFromSuperview()   // see closeCurrentTab — avoids a leaked pane
         tabManager.close(tab)
         switchToTab(tabManager.tabs[tabManager.currentIndex])
     }
