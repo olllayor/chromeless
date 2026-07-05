@@ -271,14 +271,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                     return f.contains(p) && !btn.isHidden
                 }
                 if hit !== self.lastHoveredButton {
-                    self.lastHoveredButton?.layer?.backgroundColor = .clear
+                    self.lastHoveredButton?.layer?.animateBackground(to: .clear)
                     self.lastHoveredButton = hit
-                    hit?.layer?.backgroundColor = NSColor.white.withAlphaComponent(0.12).cgColor
+                    hit?.layer?.animateBackground(to: NSColor.white.withAlphaComponent(0.12).cgColor)
                 }
             } else if event.type == .leftMouseDown {
                 // Clear nav hover on click
                 if let last = self.lastHoveredButton {
-                    last.layer?.backgroundColor = .clear
+                    last.layer?.animateBackground(to: .clear)
                     self.lastHoveredButton = nil
                 }
             }
@@ -1713,6 +1713,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             urlField.stringValue = u.absoluteString
         }
         urlField.alignment = .natural
+        // While editing, the leading glyph is a search magnifier (image 2), not
+        // the site-settings "tune" glyph — you're about to search or type a URL.
+        locationIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search")
+        locationIcon.contentTintColor = .secondaryLabelColor
         locationBar.layer?.borderColor = ChromeTheme.accent.withAlphaComponent(0.45).cgColor
         locationBar.layer?.borderWidth = 1
         // Set the flag up front rather than waiting for the (unreliable)
@@ -1803,6 +1807,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if obj.object as? NSTextField == urlField {
             (window as? BrowserWindow)?.isEditingURLField = true
             urlField.alignment = .natural
+            locationIcon.image = NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Search")
+            locationIcon.contentTintColor = .secondaryLabelColor
             locationBar.layer?.borderColor = ChromeTheme.accent.withAlphaComponent(0.45).cgColor
             locationBar.layer?.borderWidth = 1
         }

@@ -98,8 +98,8 @@ final class Tab {
 final class TabCloseButton: NSButton {
     private var trackingArea: NSTrackingArea?
     private var isHoveredOverButton = false {
-        didSet { layer?.backgroundColor = isHoveredOverButton
-            ? NSColor.white.withAlphaComponent(0.14).cgColor : NSColor.clear.cgColor }
+        didSet { layer?.animateBackground(to: isHoveredOverButton
+            ? NSColor.white.withAlphaComponent(0.14).cgColor : NSColor.clear.cgColor) }
     }
 
     override init(frame frameRect: NSRect) {
@@ -129,8 +129,8 @@ final class TabCloseButton: NSButton {
 final class TabAudioButton: NSButton {
     private var trackingArea: NSTrackingArea?
     private var isHoveredOverButton = false {
-        didSet { layer?.backgroundColor = isHoveredOverButton
-            ? NSColor.white.withAlphaComponent(0.14).cgColor : NSColor.clear.cgColor }
+        didSet { layer?.animateBackground(to: isHoveredOverButton
+            ? NSColor.white.withAlphaComponent(0.14).cgColor : NSColor.clear.cgColor) }
     }
 
     override init(frame frameRect: NSRect) {
@@ -328,19 +328,23 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
 
     private func updateAudioIcon() {
         let name = isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill"
+        let cfg = NSImage.SymbolConfiguration(pointSize: 10.5, weight: .medium)
         audioButton.image = NSImage(systemSymbolName: name,
-                                    accessibilityDescription: isMuted ? "Muted" : "Playing audio")
+                                    accessibilityDescription: isMuted ? "Muted" : "Playing audio")?
+            .withSymbolConfiguration(cfg)
     }
 
     override func layout() {
         super.layout()
         let h = bounds.height
         let pad: CGFloat = 10
-        let iconSize: CGFloat = 17
+        let iconSize: CGFloat = 16
         let closeSize: CGFloat = 16
-        let gap: CGFloat = 6
-        let audioSize: CGFloat = 12
-        let audioGap: CGFloat = 4
+        let gap: CGFloat = 7
+        // The audio/mute button gets its own square touch target sized close to the
+        // favicon so the left cluster (favicon · speaker · title) reads evenly.
+        let audioSize: CGFloat = 16
+        let audioGap: CGFloat = 6
 
         // Favicon first (left edge), then the audio/mute button just right of it.
         faviconView.frame = NSRect(x: pad, y: (h - iconSize) / 2, width: iconSize, height: iconSize)
@@ -403,22 +407,25 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
         // Helium: active tab is a lighter "surface" pill that floats above the
         // darker tab strip — not near-black. Matches the URL pill's surface tone.
         let activeSurface = NSColor(calibratedWhite: 0.17, alpha: 1)
+        let bg: CGColor
         if isSelected {
-            layer?.backgroundColor = activeSurface.cgColor
+            bg = activeSurface.cgColor
             closeButton.image = NSImage(systemSymbolName: "xmark.circle.fill", accessibilityDescription: "Close tab")
             closeButton.contentTintColor = .secondaryLabelColor
             titleLabel.textColor = .labelColor
         } else if isHovered {
-            layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
+            bg = NSColor.white.withAlphaComponent(0.08).cgColor
             closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
-            closeButton.contentTintColor = .tertiaryLabelColor
-            titleLabel.textColor = .secondaryLabelColor
+            closeButton.contentTintColor = .secondaryLabelColor
+            titleLabel.textColor = .labelColor
         } else {
-            layer?.backgroundColor = NSColor.clear.cgColor
+            bg = NSColor.clear.cgColor
             closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
             closeButton.contentTintColor = .tertiaryLabelColor
-            titleLabel.textColor = .tertiaryLabelColor
+            // Inactive titles were tertiary (too faint to read) — bump to secondary.
+            titleLabel.textColor = .secondaryLabelColor
         }
+        layer?.animateBackground(to: bg)
         // Helium: the × appears only under the pointer — even on the active tab —
         // for a quieter strip.
         closeButton.isHidden = !isHovered

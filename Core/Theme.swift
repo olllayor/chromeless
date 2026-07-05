@@ -24,3 +24,17 @@ enum ChromeTheme {
 
     static var roundedFrame: Bool { UserDefaults.standard.object(forKey: "RoundedFrame") as? Bool ?? true }
 }
+
+extension CALayer {
+    /// Cross-fade the layer's background colour instead of snapping — used for
+    /// hover states so they ease in/out rather than jump.
+    func animateBackground(to color: CGColor?, duration: CFTimeInterval = 0.13) {
+        let anim = CABasicAnimation(keyPath: "backgroundColor")
+        anim.fromValue = backgroundColor
+        anim.toValue = color
+        anim.duration = duration
+        anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        add(anim, forKey: "bgfade")
+        backgroundColor = color
+    }
+}
