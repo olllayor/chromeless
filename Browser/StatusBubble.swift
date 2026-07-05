@@ -22,7 +22,9 @@ final class StatusBubble: NSView {
         layer?.backgroundColor = NSColor(calibratedWhite: 0.12, alpha: 0.98).cgColor
         label.font = .systemFont(ofSize: 11.5)
         label.textColor = .secondaryLabelColor
-        label.lineBreakMode = .byTruncatingMiddle
+        // Tail truncation keeps the important domain head readable (a bare domain
+        // never truncates); middle truncation made short URLs look broken.
+        label.lineBreakMode = .byTruncatingTail
         label.cell?.usesSingleLineMode = true
         (label.cell as? NSTextFieldCell)?.truncatesLastVisibleLine = true
         addSubview(label)
@@ -44,8 +46,10 @@ final class StatusBubble: NSView {
     /// Intrinsic width for the current text, capped at `maxWidth` (Helium caps at
     /// ⅓ of the content width). H-padding 10 each side.
     func fittingWidth(maxWidth: CGFloat) -> CGFloat {
-        let textW = ceil(label.attributedStringValue.size().width) + 2
-        return max(60, min(maxWidth, textW + 20))
+        // Measure with the actual font so short URLs get a bubble wide enough to
+        // show in full (no spurious truncation).
+        let w = (label.stringValue as NSString).size(withAttributes: [.font: label.font as Any]).width
+        return max(80, min(maxWidth, ceil(w) + 22))
     }
 
     func layoutLabel() {

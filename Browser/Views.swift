@@ -122,14 +122,8 @@ final class BrowserWebView: WKWebView {
         return digit - 1
     }
 
-    // ⌘-drag anywhere moves the window; mouse buttons 4/5 go back/forward.
-    override func mouseDown(with event: NSEvent) {
-        if event.modifierFlags.contains(.command) {
-            window?.performDrag(with: event)
-            return
-        }
-        super.mouseDown(with: event)
-    }
+    // Mouse buttons 4/5 go back/forward. (⌘-click is handled in the navigation
+    // policy — no mouseDown override, so ⌘-clicks reach WebKit normally.)
     override func otherMouseUp(with event: NSEvent) {
         if event.buttonNumber == 3, canGoBack { goBack(); return }
         if event.buttonNumber == 4, canGoForward { goForward(); return }

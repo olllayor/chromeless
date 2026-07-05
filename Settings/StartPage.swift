@@ -35,7 +35,6 @@ let startPageHTML = """
     <div class="k"><kbd>&#8984; F</kbd></div>       <div>find on page</div>
     <div class="k"><kbd>&#8984; D</kbd></div>       <div>bookmark this page</div>
     <div class="k"><kbd>&#8679;&#8984; J</kbd></div><div>downloads</div>
-    <div class="k"><kbd>&#8984; drag</kbd></div>    <div>move the window</div>
     <div class="k"><kbd>&#8963;&#8984; F</kbd></div><div>fullscreen</div>
     <div class="k"><kbd>&#8679;&#8984; S</kbd></div><div>snapshot the page &rarr; desktop</div>
     <div class="k"><kbd>&#8984; P</kbd></div>       <div>pin on top of every window</div>

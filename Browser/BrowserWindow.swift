@@ -1388,7 +1388,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     // MARK: Status bubble (hover link preview)
 
     func showStatusBubble(_ urlString: String) {
-        statusBubble.text = prettyURL(urlString)
+        var display = prettyURL(urlString)
+        if display.hasPrefix("www.") { display.removeFirst(4) }
+        statusBubble.text = display
         statusBubbleHide?.cancel()
         let wasHidden = statusBubble.isHidden
         statusBubble.isHidden = false
@@ -1515,7 +1517,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         progressBar.frame = NSRect(x: 0, y: progressY, width: b.width * lastProgress, height: 2)
 
         if !statusBubble.isHidden {
-            let sbW = statusBubble.fittingWidth(maxWidth: b.width / 3)
+            let sbW = statusBubble.fittingWidth(maxWidth: b.width * 0.5)
             let sbInset: CGFloat = 8
             statusBubble.frame = NSRect(x: sbInset, y: sbInset, width: sbW, height: 24)
             statusBubble.layoutLabel()
@@ -2548,9 +2550,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             let middleClick = navigationAction.buttonNumber == 2
             let newWindow = navigationAction.targetFrame == nil
             if cmdClick || middleClick || newWindow {
-                // Cmd-click opens in the background (Chrome/Safari); Cmd+Shift, a
-                // middle-click, or an explicit _blank brings the tab forward.
-                let background = cmdClick && !mods.contains(.shift)
+                // ⌘-click and middle-click open a background tab (Chrome/Safari);
+                // ⌘+Shift or an explicit _blank brings the new tab forward.
+                let background = (cmdClick || middleClick) && !mods.contains(.shift)
                 newTab(url: url, background: background)
                 decisionHandler(.cancel)
                 return
