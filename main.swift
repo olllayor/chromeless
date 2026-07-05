@@ -127,8 +127,147 @@ enum WebViewFactory {
                 forMainFrameOnly: false)
             conf.userContentController.addUserScript(hideWebAuthn)
         }
+        ContentBlocker.shared.apply(to: conf.userContentController)
         return conf
     }
+}
+
+// MARK: - ContentBlocker
+//
+// Ad/tracker blocking via WebKit's native WKContentRuleList. A curated set of
+// third-party ad/tracker domains is compiled once into a content-rule bytecode
+// list by WebKit itself — no extension host, no JS filtering engine. The
+// compiled list is cached on disk by WKContentRuleListStore keyed on `identifier`
+// and survives relaunches, so the compile cost is paid only when the list
+// changes (bump the version suffix on `identifier` to force a recompile).
+final class ContentBlocker {
+    static let shared = ContentBlocker()
+
+    // Bump the `-vN` suffix whenever `domains` changes so the cached
+    // compilation is invalidated and WebKit recompiles the new list.
+    private let identifier = "chromeless-blocker-v1"
+
+    private var ruleList: WKContentRuleList?
+    private var pending: [() -> Void] = []
+    private(set) var enabled: Bool
+
+    private init() {
+        enabled = UserDefaults.standard.object(forKey: "ContentBlockingEnabled") as? Bool ?? true
+    }
+
+    /// Compile (or load from cache) the rule list. Call once at launch, before
+    /// any web views are created — all state stays on the main thread.
+    func prepare() {
+        guard let store = WKContentRuleListStore.default() else { return }
+        let done: (WKContentRuleList?) -> Void = { [weak self] list in
+            guard let self, let list else { return }
+            self.ruleList = list
+            let jobs = self.pending
+            self.pending.removeAll()
+            jobs.forEach { $0() }
+        }
+        store.lookUpContentRuleList(forIdentifier: identifier) { [weak self] list, _ in
+            guard let self else { return }
+            if let list { done(list); return }
+            store.compileContentRuleList(forIdentifier: self.identifier,
+                                         encodedContentRuleList: Self.buildJSON()) { list, error in
+                if let error {
+                    fputs("chromeless: content blocker compile failed: \(error.localizedDescription)\n", stderr)
+                }
+                done(list)  // fail open — a nil list just means no blocking
+            }
+        }
+    }
+
+    /// Add or remove the compiled list on a user-content controller to match the
+    /// current on/off state. If compilation hasn't finished, defers until it has.
+    func apply(to controller: WKUserContentController) {
+        guard let list = ruleList else {
+            if enabled {
+                pending.append { [weak self, weak controller] in
+                    if let controller { self?.apply(to: controller) }
+                }
+            }
+            return
+        }
+        if enabled { controller.add(list) } else { controller.remove(list) }
+    }
+
+    /// Toggle blocking and re-apply across all currently-open web views.
+    func setEnabled(_ on: Bool, controllers: [WKUserContentController]) {
+        enabled = on
+        UserDefaults.standard.set(on, forKey: "ContentBlockingEnabled")
+        controllers.forEach { apply(to: $0) }
+    }
+
+    /// Build the Apple content-blocker JSON from `domains`. Each domain becomes a
+    /// third-party `block` rule matching the host and any subdomain. Building via
+    /// JSONSerialization avoids hand-escaping backslashes in the regex.
+    static func buildJSON() -> String {
+        let rules: [[String: Any]] = domains.map { domain in
+            let esc = NSRegularExpression.escapedPattern(for: domain)
+            return [
+                "trigger": [
+                    "url-filter": "^https?://([^/]+\\.)?\(esc)",
+                    "load-type": ["third-party"],
+                ],
+                "action": ["type": "block"],
+            ]
+        }
+        guard let data = try? JSONSerialization.data(withJSONObject: rules),
+              let json = String(data: data, encoding: .utf8) else { return "[]" }
+        return json
+    }
+
+    /// Curated top ad/tracker domains (subset of EasyList/EasyPrivacy). Blocked
+    /// only as third-party requests, so first-party site functionality is intact.
+    static let domains: [String] = [
+        // Google ads / analytics
+        "doubleclick.net", "google-analytics.com", "googletagmanager.com",
+        "googletagservices.com", "googlesyndication.com", "googleadservices.com",
+        "adservice.google.com", "2mdn.net", "app-measurement.com",
+        // Facebook / Meta
+        "connect.facebook.net", "facebook.net", "pixel.facebook.com",
+        // Amazon
+        "amazon-adsystem.com", "assoc-amazon.com",
+        // Microsoft / Bing
+        "bat.bing.com", "clarity.ms",
+        // Twitter/X
+        "ads-twitter.com", "analytics.twitter.com", "static.ads-twitter.com",
+        // Big ad exchanges / SSPs / DSPs
+        "adnxs.com", "adsrvr.org", "rubiconproject.com", "pubmatic.com",
+        "casalemedia.com", "bidswitch.net", "openx.net", "rlcdn.com",
+        "3lift.com", "sharethrough.com", "gumgum.com", "smartadserver.com",
+        "criteo.com", "criteo.net", "taboola.com", "outbrain.com",
+        "adform.net", "teads.tv", "yieldmo.com", "indexww.com",
+        "contextweb.com", "spotxchange.com", "spotx.tv", "adcolony.com",
+        "inmobi.com", "mopub.com", "applovin.com", "unityads.unity3d.com",
+        // Analytics / measurement / attribution
+        "scorecardresearch.com", "quantserve.com", "quantcount.com",
+        "moatads.com", "mixpanel.com", "segment.com", "segment.io",
+        "branch.io", "amplitude.com", "hotjar.com", "crazyegg.com",
+        "fullstory.com", "mouseflow.com", "chartbeat.com", "chartbeat.net",
+        "newrelic.com", "nr-data.net", "optimizely.com", "kissmetrics.com",
+        "heap.io", "heapanalytics.com", "keen.io", "loggly.com",
+        "parsely.com", "tapad.com", "adroll.com",
+        "getdrip.com", "clicktale.net", "sessioncam.com", "inspectlet.com",
+        "cxense.com", "adobedtm.com", "demdex.net", "omtrdc.net",
+        "everesttech.net", "2o7.net", "hs-analytics.net", "hubspot.com",
+        // Consent / tag / audience
+        "onetrust.com", "cookielaw.org", "ensighten.com", "tealium.com",
+        "tealiumiq.com", "bluekai.com", "krxd.net", "agkn.com",
+        "exelator.com", "mathtag.com", "bluecava.com", "eyeota.net",
+        "liadm.com", "id5-sync.com", "crwdcntrl.net", "lijit.com",
+        // Push / retargeting / misc trackers
+        "pushcrew.com", "onesignal.com", "sail-horizon.com", "yieldlab.net",
+        "servedbyadbutler.com", "adzerk.net", "revcontent.com", "mgid.com",
+        "zergnet.com", "smartclip.net", "districtm.io", "sonobi.com",
+        "media.net", "adblade.com", "adhigh.net", "adhese.com",
+        "improvedigital.com", "emxdgt.com", "gammaplatform.com",
+        "flashtalking.com", "serving-sys.com",
+        "tremorhub.com", "bidr.io", "w55c.net", "simpli.fi",
+        "turn.com", "dotomi.com", "rfihub.com", "mookie1.com",
+    ]
 }
 
 // MARK: - Storage
@@ -210,6 +349,7 @@ final class FaviconCache {
     static let shared = FaviconCache()
     private let memCache = NSCache<NSString, NSImage>()
     private let diskDir: URL
+    private let ioQueue = DispatchQueue(label: "chromeless.favicon.io", qos: .utility)
 
     private init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -221,29 +361,36 @@ final class FaviconCache {
     func favicon(for url: URL, completion: @escaping (NSImage?) -> Void) {
         guard let host = url.host else { completion(nil); return }
         let key = host as NSString
+        // memCache is the fast path — keep it synchronous on the caller (main),
+        // so a warm tab-bar rebuild never touches disk.
         if let cached = memCache.object(forKey: key) {
             completion(cached)
             return
         }
         let diskPath = diskDir.appendingPathComponent("\(host).png")
-        if let data = try? Data(contentsOf: diskPath),
-           let img = NSImage(data: data) {
-            memCache.setObject(img, forKey: key)
-            completion(img)
-            return
-        }
-        let iconURL = URL(string: "https://\(host)/favicon.ico") ?? url
-        let task = URLSession.shared.dataTask(with: iconURL) { [weak self] data, _, _ in
-            guard let data, let img = NSImage(data: data) else {
-                DispatchQueue.main.async { completion(nil) }
+        // Disk read + network are pushed off the main thread; only the callback
+        // hops back. Previously the Data(contentsOf:) blocked main on every miss.
+        ioQueue.async { [weak self] in
+            guard let self else { return }
+            if let data = try? Data(contentsOf: diskPath),
+               let img = NSImage(data: data) {
+                self.memCache.setObject(img, forKey: key)
+                DispatchQueue.main.async { completion(img) }
                 return
             }
-            let resized = FaviconCache.resize(img, to: NSSize(width: 32, height: 32))
-            self?.memCache.setObject(resized, forKey: key)
-            try? resized.tiffRepresentation?.write(to: diskPath)
-            DispatchQueue.main.async { completion(resized) }
+            let iconURL = URL(string: "https://\(host)/favicon.ico") ?? url
+            let task = URLSession.shared.dataTask(with: iconURL) { [weak self] data, _, _ in
+                guard let data, let img = NSImage(data: data) else {
+                    DispatchQueue.main.async { completion(nil) }
+                    return
+                }
+                let resized = FaviconCache.resize(img, to: NSSize(width: 32, height: 32))
+                self?.memCache.setObject(resized, forKey: key)
+                try? resized.tiffRepresentation?.write(to: diskPath)
+                DispatchQueue.main.async { completion(resized) }
+            }
+            task.resume()
         }
-        task.resume()
     }
 
     private static func resize(_ image: NSImage, to size: NSSize) -> NSImage {
@@ -542,6 +689,7 @@ struct DownloadItem {
     var receivedBytes: Int64 = 0
     var totalBytes: Int64 = 0
     var status: Status = .running
+    var resumeData: Data?
     enum Status { case running, completed, failed }
 }
 
@@ -603,10 +751,75 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
         guard var item = activeDownloads[key],
               let idx = items.firstIndex(where: { $0.id == item.id }) else { return }
         item.status = .failed
+        item.resumeData = resumeData
         items[idx] = item
         activeDownloads.removeValue(forKey: key)
         onUpdate?()
     }
+
+    /// Retry a failed download from its resume data. WebKit hands back a fresh
+    /// WKDownload that re-enters the normal delegate flow (new row); the old
+    /// failed entry is dropped so the list shows a single, live download.
+    func resume(_ item: DownloadItem, in webView: WKWebView) {
+        guard let data = item.resumeData else { return }
+        items.removeAll { $0.id == item.id }
+        onUpdate?()
+        webView.resumeDownload(fromResumeData: data) { [weak self] download in
+            download.delegate = self
+        }
+    }
+
+    /// Reveal a finished download in Finder.
+    func revealInFinder(_ item: DownloadItem) {
+        NSWorkspace.shared.activateFileViewerSelecting([item.destinationURL])
+    }
+}
+
+/// A download list row that reveals-in-Finder (completed) or retries (failed) on
+/// click, with a pointing-hand cursor to signal it's actionable.
+final class DownloadRow: NSView {
+    var onClick: (() -> Void)?
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
+    }
+}
+
+// MARK: - Per-site zoom persistence
+
+enum ZoomStore {
+    private static let key = "PerSiteZoom"
+
+    static func zoom(for host: String) -> CGFloat {
+        let dict = UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
+        return CGFloat(dict[host] ?? 1.0)
+    }
+
+    static func set(_ zoom: CGFloat, for host: String) {
+        var dict = UserDefaults.standard.dictionary(forKey: key) as? [String: Double] ?? [:]
+        if abs(zoom - 1.0) < 0.001 { dict.removeValue(forKey: host) }  // don't persist the default
+        else { dict[host] = Double(zoom) }
+        UserDefaults.standard.set(dict, forKey: key)
+    }
+}
+
+// MARK: - Reopen closed tab
+
+/// App-wide stack of recently-closed tab URLs, restored newest-first via ⌘⇧T.
+enum ClosedTabStore {
+    private(set) static var stack: [URL] = []
+
+    static func push(_ url: URL?) {
+        guard let url, url.scheme == "http" || url.scheme == "https" else { return }
+        stack.append(url)
+        if stack.count > 50 { stack.removeFirst() }
+    }
+
+    static func pop() -> URL? { stack.popLast() }
 }
 
 // MARK: - Tabs
@@ -933,8 +1146,7 @@ final class BrowserWebView: WKWebView {
             onTabCycle?(mods.contains(.shift))
             return
         }
-        if mods.contains(.command), event.keyCode >= 18, event.keyCode <= 26 {
-            let index = Int(event.keyCode - 18)
+        if let index = Self.tabSwitchIndex(for: event, mods: mods) {
             onTabSwitch?(index)
             return
         }
@@ -947,12 +1159,22 @@ final class BrowserWebView: WKWebView {
             onTabCycle?(mods.contains(.shift))
             return true
         }
-        if mods.contains(.command), event.keyCode >= 18, event.keyCode <= 26 {
-            let index = Int(event.keyCode - 18)
+        if let index = Self.tabSwitchIndex(for: event, mods: mods) {
             onTabSwitch?(index)
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// ⌘1–⌘9 → tab index 0–8, matched on the actual digit character so it doesn't
+    /// collide with `=`/`-` (keyCodes 24/27) and works regardless of layout.
+    /// Requires *exactly* Command (no Shift), so ⌘= (zoom in) is left for the menu.
+    private static func tabSwitchIndex(for event: NSEvent, mods: NSEvent.ModifierFlags) -> Int? {
+        guard mods == .command,
+              let ch = event.charactersIgnoringModifiers,
+              ch.count == 1, let digit = Int(ch), digit >= 1, digit <= 9
+        else { return nil }
+        return digit - 1
     }
 
     // ⌘-drag anywhere moves the window; mouse buttons 4/5 go back/forward.
@@ -1135,7 +1357,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    private var trafficLightsDimmed: Bool?
     private func dimTrafficLights(_ dim: Bool) {
+        // Called on every mouseMoved — skip the layer writes unless the state
+        // actually flips, so hovering the page doesn't thrash three buttons.
+        guard trafficLightsDimmed != dim else { return }
+        trafficLightsDimmed = dim
         for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
             window?.standardWindowButton(kind)?.alphaValue = dim ? 0.5 : 1.0
         }
@@ -1304,6 +1531,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func closeCurrentTab() {
+        ClosedTabStore.push(tabManager.current?.url)
         if tabManager.count <= 1 {
             let oldTab = tabManager.tabs.first
             oldTab?.webView.removeFromSuperview()
@@ -1592,6 +1820,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func closeTabFromContext(_ sender: NSMenuItem) {
         guard let tab = sender.representedObject as? Tab else { return }
+        ClosedTabStore.push(tab.url)
         if tabManager.count == 1 {
             window?.close()
             return
@@ -1603,7 +1832,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     @objc private func closeOtherTabs(_ sender: NSMenuItem) {
         guard let keepTab = sender.representedObject as? Tab else { return }
         let toClose = tabManager.tabs.filter { $0.id != keepTab.id }
-        for tab in toClose { tab.webView.removeFromSuperview() }
+        for tab in toClose { ClosedTabStore.push(tab.url); tab.webView.removeFromSuperview() }
         tabManager.closeAll(except: keepTab)
         switchToTab(keepTab)
     }
@@ -1613,24 +1842,52 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         refreshTabBar()
     }
 
+    @objc func reopenClosedTab(_ sender: Any?) {
+        guard let url = ClosedTabStore.pop() else { return }
+        newTab(url: url)
+        refreshTabBar()
+    }
+
     private func refreshDownloads() {
         downloadsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for item in DownloadManager.shared.items.reversed() {
-            let row = NSView()
+            let row = DownloadRow()
             let label = NSTextField(labelWithString: item.filename)
             label.font = ChromeFont.downloadTitle
             label.lineBreakMode = .byTruncatingMiddle
-            let statusLabel = NSTextField(labelWithString: item.status == .completed ? "✓" : "\(item.receivedBytes)")
+            let statusLabel = NSTextField(labelWithString: Self.downloadStatusText(item))
             statusLabel.font = ChromeFont.downloadStatus
-            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.textColor = item.status == .failed ? .systemRed : .secondaryLabelColor
+            statusLabel.alignment = .right
             row.addSubview(label)
             row.addSubview(statusLabel)
-            label.frame = NSRect(x: 0, y: 0, width: 280, height: 28)
-            statusLabel.frame = NSRect(x: 290, y: 0, width: 70, height: 28)
+            label.frame = NSRect(x: 0, y: 0, width: 250, height: 28)
+            statusLabel.frame = NSRect(x: 250, y: 0, width: 110, height: 28)
             row.frame = NSRect(x: 0, y: 0, width: 360, height: 36)
+            switch item.status {
+            case .completed:
+                row.onClick = { DownloadManager.shared.revealInFinder(item) }
+            case .failed where item.resumeData != nil:
+                row.onClick = { [weak self] in
+                    guard let self else { return }
+                    DownloadManager.shared.resume(item, in: self.webView)
+                }
+            default:
+                break
+            }
             downloadsStack.addArrangedSubview(row)
         }
         layoutOverlays()
+    }
+
+    private static func downloadStatusText(_ item: DownloadItem) -> String {
+        switch item.status {
+        case .completed: return "Show in Finder"
+        case .failed:    return item.resumeData != nil ? "Failed — Retry" : "Failed"
+        case .running:
+            let bcf = ByteCountFormatter.string(fromByteCount: item.receivedBytes, countStyle: .file)
+            return bcf
+        }
     }
 
     private func buildChrome(in container: NSView) {
@@ -2378,9 +2635,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     @objc func goBackAction(_ sender: Any?) { webView.goBack(); updateURLField() }
     @objc func goForwardAction(_ sender: Any?) { webView.goForward(); updateURLField() }
 
-    @objc func zoomInPage(_ sender: Any?) { webView.pageZoom = min(webView.pageZoom * 1.1, 5.0) }
-    @objc func zoomOutPage(_ sender: Any?) { webView.pageZoom = max(webView.pageZoom / 1.1, 0.25) }
-    @objc func resetZoom(_ sender: Any?) { webView.pageZoom = 1.0 }
+    @objc func zoomInPage(_ sender: Any?) { setPageZoom(min(webView.pageZoom * 1.1, 5.0)) }
+    @objc func zoomOutPage(_ sender: Any?) { setPageZoom(max(webView.pageZoom / 1.1, 0.25)) }
+    @objc func resetZoom(_ sender: Any?) { setPageZoom(1.0) }
+
+    private func setPageZoom(_ z: CGFloat) {
+        webView.pageZoom = z
+        if let host = webView.url?.host { ZoomStore.set(z, for: host) }
+    }
 
     @objc func saveSnapshot(_ sender: Any?) {
         let formatter = DateFormatter()
@@ -2445,6 +2707,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let u = webView.url?.absoluteString
         if u != nil && u != "about:blank" { onStartPage = false }
         if !findBar.isHidden { hideFindBar(nil) }
+        // Apply the per-site zoom the moment the new document commits, before it
+        // paints, so there's no visible reflow from 100% → stored level.
+        if let host = webView.url?.host {
+            let z = ZoomStore.zoom(for: host)
+            if webView.pageZoom != z { webView.pageZoom = z }
+        }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -2559,6 +2827,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         UserDefaults.standard.register(defaults: ["NewTabNextToActive": true])
+        ContentBlocker.shared.prepare()
         buildMenu()
 
         let urlsToRestore: [URL] = {
@@ -2611,6 +2880,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         (NSApp.keyWindow?.windowController as? BrowserWindowController)?.focusURLField()
     }
 
+    @objc func toggleContentBlocking(_ sender: NSMenuItem) {
+        let on = !ContentBlocker.shared.enabled
+        let controllers = self.controllers.flatMap { wc in
+            wc.tabManager.tabs.map { $0.webView.configuration.userContentController }
+        }
+        ContentBlocker.shared.setEnabled(on, controllers: controllers)
+        sender.state = on ? .on : .off
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
     func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool { true }
 
@@ -2661,6 +2939,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "New Tab",
                          action: #selector(AppDelegate.newTab(_:)), keyEquivalent: "t")
+        // Uppercase "T" auto-implies Shift for both display and matching — a
+        // lowercase "t" with an explicit shift mask never matches, because the
+        // event's charactersIgnoringModifiers already carries the shift ("T").
+        let reopenTab = fileMenu.addItem(withTitle: "Reopen Closed Tab",
+                                         action: #selector(AppDelegate.reopenClosedTab(_:)), keyEquivalent: "T")
+        reopenTab.target = self
         fileMenu.addItem(withTitle: "Close Tab",
                          action: #selector(AppDelegate.closeTab(_:)), keyEquivalent: "w")
         fileMenu.addItem(withTitle: "Close Window",
@@ -2704,6 +2988,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         viewMenu.addItem(.separator())
         viewMenu.addItem(withTitle: "Zoom In",
                          action: #selector(BrowserWindowController.zoomInPage(_:)), keyEquivalent: "=")
+        // Hidden alternate so ⌘+ (⌘⇧=) also zooms in, not just ⌘=.
+        let zoomInPlus = viewMenu.addItem(withTitle: "Zoom In",
+                                          action: #selector(BrowserWindowController.zoomInPage(_:)), keyEquivalent: "+")
+        zoomInPlus.keyEquivalentModifierMask = [.command, .shift]
+        zoomInPlus.isAlternate = true
         viewMenu.addItem(withTitle: "Zoom Out",
                          action: #selector(BrowserWindowController.zoomOutPage(_:)), keyEquivalent: "-")
         viewMenu.addItem(withTitle: "Actual Size",
@@ -2712,6 +3001,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen",
                                           action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.command, .control]
+        viewMenu.addItem(.separator())
+        let blockAds = viewMenu.addItem(withTitle: "Block Ads & Trackers",
+                                        action: #selector(toggleContentBlocking(_:)), keyEquivalent: "")
+        blockAds.target = self
+        blockAds.state = ContentBlocker.shared.enabled ? .on : .off
         main.addItem(withTitle: "View", action: nil, keyEquivalent: "").submenu = viewMenu
 
         let historyMenu = NSMenu(title: "History")
@@ -2802,6 +3096,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func closeTab(_ sender: Any?) {
         if let wc = NSApp.keyWindow?.windowController as? BrowserWindowController {
             wc.closeCurrentTab()
+        }
+    }
+
+    @objc func reopenClosedTab(_ sender: Any?) {
+        if let wc = NSApp.keyWindow?.windowController as? BrowserWindowController {
+            wc.reopenClosedTab(sender)
+        } else if let url = ClosedTabStore.pop() {
+            openWindow(url: url)
         }
     }
 
