@@ -510,6 +510,18 @@ final class TabManager {
     var count: Int { tabs.count }
     var isEmpty: Bool { tabs.isEmpty }
 
+    /// Reorder a tab within the strip, keeping the selection on the same tab.
+    func move(from: Int, to: Int) {
+        guard from != to, tabs.indices.contains(from), tabs.indices.contains(to) else { return }
+        let selected = current
+        let t = tabs.remove(at: from)
+        tabs.insert(t, at: to)
+        if let selected, let idx = tabs.firstIndex(where: { $0.id == selected.id }) {
+            currentIndex = idx
+        }
+        onTabsChanged?()
+    }
+
     func replaceAll(with tab: Tab) {
         tabs = [tab]
         mruOrder = [tab]

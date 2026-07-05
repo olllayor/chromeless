@@ -883,6 +883,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             )
             // Preserve current audio/mute state across a tab-bar rebuild.
             item.update(playingAudio: tab.isPlayingAudio, muted: tab.isMuted)
+            // Drag to reorder (Chrome/Helium): the item follows the pointer
+            // horizontally; on release it settles into the nearest slot. The
+            // pan's movement threshold keeps plain clicks going to the click
+            // recognizer untouched.
+            item.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(tabItemPanned(_:))))
             item.translatesAutoresizingMaskIntoConstraints = false
             item.layer?.zPosition = isSelected ? 10 : CGFloat(tabItems.count - i)
             let widthC = item.widthAnchor.constraint(equalToConstant: TabBarItem.maxWidth)
@@ -965,6 +970,32 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let avail = tabBar.bounds.width - trafficLightInset - rightInset - addBtnWidth - totalGaps
         let per = min(TabBarItem.maxWidth, max(TabBarItem.minWidth, floor(avail / CGFloat(count))))
         for c in tabWidthConstraints { c.constant = per }
+    }
+
+    @objc private func tabItemPanned(_ g: NSPanGestureRecognizer) {
+        guard let item = g.view as? TabBarItem else { return }
+        switch g.state {
+        case .began:
+            item.layer?.zPosition = 100
+        case .changed:
+            // Track the pointer horizontally only; the strip is a single row.
+            let tx = g.translation(in: tabStack).x
+            item.layer?.setAffineTransform(CGAffineTransform(translationX: tx, y: 0))
+        case .ended, .cancelled:
+            let tx = g.translation(in: tabStack).x
+            item.layer?.setAffineTransform(.identity)
+            // One slot per full item width (incl. stack gap) the pointer moved.
+            let slotW = item.bounds.width + tabStack.spacing
+            let delta = slotW > 0 ? Int((tx / slotW).rounded()) : 0
+            let target = max(0, min(tabManager.count - 1, item.index + delta))
+            if target != item.index {
+                tabManager.move(from: item.index, to: target)   // triggers refreshTabBar
+            } else {
+                refreshTabBar()   // clears the lifted zPosition
+            }
+        default:
+            break
+        }
     }
 
     @objc private func tabItemClicked(_ sender: NSClickGestureRecognizer) {
