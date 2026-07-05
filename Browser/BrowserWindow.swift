@@ -16,6 +16,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     /// `nil` = normal single-pane. The active tab is always one of the pair;
     /// selecting any third tab exits the split.
     private var splitPair: (Tab, Tab)?
+    /// Left pane's share of the split width; draggable via the divider strip.
+    private var splitRatio: CGFloat = 0.5
+    private let splitDivider = SplitDividerView()
     private let overlayRoot = OverlayRootView()
     private let progressBar = NSView()
     private let hud = NSVisualEffectView()
@@ -586,13 +589,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         // Split view: both panes are rounded cards regardless of the
         // rounded-frame setting; the active pane gets a brighter edge.
         if let (l, r) = splitPair, wv === l.webView || wv === r.webView {
-            let inset: CGFloat = 8
-            let gap: CGFloat = 8
-            let paneW = floor((b.width - inset * 2 - gap) / 2)
-            let paneH = b.height - contentTop - inset * 2
-            let x = wv === l.webView ? inset : inset + paneW + gap
+            let geo = splitGeometry(in: b, contentTop: contentTop)
             wv.autoresizingMask = []   // explicit frames; layoutOverlays tracks resize
-            wv.frame = NSRect(x: x, y: inset, width: paneW, height: paneH)
+            wv.frame = wv === l.webView ? geo.left : geo.right
             wv.layer?.cornerRadius = 10
             wv.layer?.maskedCorners = allCorners
             wv.layer?.borderWidth = 1
@@ -714,6 +713,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     // MARK: Split view
 
+    /// Pane + divider rects for the current ratio. Panes never shrink past
+    /// 240pt; the divider occupies the 8pt gap between them.
+    private func splitGeometry(in b: NSRect, contentTop: CGFloat) -> (left: NSRect, right: NSRect, divider: NSRect) {
+        let inset: CGFloat = 8
+        let gap: CGFloat = 8
+        let total = max(0, b.width - inset * 2 - gap)
+        let minPane: CGFloat = 240
+        let leftW = total <= minPane * 2
+            ? floor(total / 2)
+            : max(minPane, min(total - minPane, floor(total * splitRatio)))
+        let paneH = b.height - contentTop - inset * 2
+        let left = NSRect(x: inset, y: inset, width: leftW, height: paneH)
+        let right = NSRect(x: inset + leftW + gap, y: inset,
+                           width: total - leftW, height: paneH)
+        let divider = NSRect(x: inset + leftW, y: inset, width: gap, height: paneH)
+        return (left, right, divider)
+    }
+
     /// View ▸ Split View (⌘⇧E): pair the active tab with the next one in the
     /// strip; toggling while split exits.
     @objc func toggleSplitView(_ sender: Any?) {
@@ -735,7 +752,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         guard let container = window?.contentView,
               let cur = tabManager.current, cur.id != tab.id else { return }
         splitPair = (cur, tab)
+        splitRatio = 0.5
         container.addSubview(tab.webView, positioned: .below, relativeTo: overlayRoot)
+        // Divider strip in the gap: drag to rebalance the panes.
+        splitDivider.onDrag = { [weak self] dx in
+            guard let self, let b = self.window?.contentView?.bounds else { return }
+            let total = max(1, b.width - 16 - 8)   // matches splitGeometry insets/gap
+            self.splitRatio = min(0.9, max(0.1, self.splitRatio + dx / total))
+            self.layoutOverlays()
+        }
+        container.addSubview(splitDivider, positioned: .below, relativeTo: overlayRoot)
         layoutOverlays()
         showToast("Split view — click a pane to focus it", symbol: "rectangle.split.2x1")
     }
@@ -745,6 +771,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private func exitSplitView() {
         guard let (l, r) = splitPair else { return }
         splitPair = nil
+        splitDivider.removeFromSuperview()
         let cur = tabManager.current
         for t in [l, r] where t.id != cur?.id { t.webView.removeFromSuperview() }
     }
@@ -1644,6 +1671,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if let (l, r) = splitPair {
             frameWebView(l.webView)
             frameWebView(r.webView)
+            let contentTop = zenModeEnabled ? 0 : chromeTop
+            splitDivider.frame = splitGeometry(in: b, contentTop: contentTop).divider
+            window?.invalidateCursorRects(for: splitDivider)
         } else {
             frameWebView(webView)
         }

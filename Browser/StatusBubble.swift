@@ -57,6 +57,24 @@ final class StatusBubble: NSView {
     }
 }
 
+// MARK: - Split divider
+
+/// The grab strip between split-view panes: left-right resize cursor, reports
+/// horizontal drags to the controller, and never drags the window.
+final class SplitDividerView: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .resizeLeftRight)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        onDrag?(event.deltaX)
+    }
+}
+
 /// Routes link-hover messages from any web view to the controller of the window
 /// that view lives in. Shared singleton so `WebViewFactory` can wire every tab's
 /// content controller without needing a controller reference at creation time.
