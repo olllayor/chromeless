@@ -419,7 +419,9 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
             closeButton.contentTintColor = .tertiaryLabelColor
             titleLabel.textColor = .tertiaryLabelColor
         }
-        closeButton.isHidden = !(isHovered || isSelected)
+        // Helium: the × appears only under the pointer — even on the active tab —
+        // for a quieter strip.
+        closeButton.isHidden = !isHovered
     }
 
     func update(title: String? = nil, favicon: NSImage? = nil, loading: Bool? = nil,

@@ -136,6 +136,11 @@ let settingsHTML = """
           <div class="d">Reopen your previous session at startup.</div></div>
         <label class="sw"><input type="checkbox" id="restoreTabs"><span></span></label>
       </div>
+      <div class="row">
+        <div><div class="t">Hide the tab bar with one tab</div>
+          <div class="d">Show the tab strip only once you have more than one tab. Turn off for classic mode — the tab bar stays visible always.</div></div>
+        <label class="sw"><input type="checkbox" id="autoHideSingleTab"><span></span></label>
+      </div>
     </div>
   </section>
 
@@ -160,6 +165,16 @@ let settingsHTML = """
         <div><div class="t">Centered address bar</div>
           <div class="d">Float the address bar centered in the toolbar instead of stretching it full-width.</div></div>
         <label class="sw"><input type="checkbox" id="centeredLocationBar"><span></span></label>
+      </div>
+      <div class="row">
+        <div><div class="t">Frameless mode</div>
+          <div class="d">Automatically hide all browser UI until you hover the top edge (⌘⇧L).</div></div>
+        <label class="sw"><input type="checkbox" id="zenMode"><span></span></label>
+      </div>
+      <div class="row">
+        <div><div class="t">Minimal address bar</div>
+          <div class="d">Show only the site's domain when idle; the full URL returns when you click the address bar.</div></div>
+        <label class="sw"><input type="checkbox" id="minimalAddressBar"><span></span></label>
       </div>
       <div class="row">
         <div><div class="t">Default page zoom</div>
@@ -300,6 +315,9 @@ let settingsHTML = """
       document.getElementById('restoreTabs').checked = s.restoreTabs;
       document.getElementById('roundedFrame').checked = s.roundedFrame;
       document.getElementById('centeredLocationBar').checked = s.centeredLocationBar;
+      document.getElementById('zenMode').checked = s.zenMode;
+      document.getElementById('autoHideSingleTab').checked = s.autoHideSingleTab;
+      document.getElementById('minimalAddressBar').checked = s.minimalAddressBar;
       document.getElementById('defaultZoom').value = String(s.defaultZoom);
       document.getElementById('blockAds').checked = s.blockAds;
       document.getElementById('autofillEnabled').checked = s.autofillEnabled;
@@ -312,7 +330,7 @@ let settingsHTML = """
 
   document.getElementById('searchEngine').onchange = function (e){ send('set','searchEngine', e.target.value); };
   document.getElementById('defaultZoom').onchange = function (e){ send('set','defaultZoom', parseFloat(e.target.value)); };
-  ['searchSuggestions','newTabNextToActive','restoreTabs','roundedFrame','centeredLocationBar','blockAds','autofillEnabled','confirmationToasts'].forEach(function (id) {
+  ['searchSuggestions','newTabNextToActive','restoreTabs','roundedFrame','centeredLocationBar','zenMode','autoHideSingleTab','minimalAddressBar','blockAds','autofillEnabled','confirmationToasts'].forEach(function (id) {
     document.getElementById(id).onchange = function (e){ send('set', id, e.target.checked); };
   });
   document.querySelectorAll('.swatch').forEach(function (s) {

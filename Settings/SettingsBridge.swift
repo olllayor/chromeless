@@ -31,6 +31,9 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
             "accentHex": ChromeTheme.accentHex,
             "roundedFrame": ChromeTheme.roundedFrame,
             "centeredLocationBar": d.object(forKey: "CenteredLocationBar") as? Bool ?? true,
+            "zenMode": d.bool(forKey: "ZenMode"),
+            "autoHideSingleTab": d.object(forKey: "AutoHideSingleTab") as? Bool ?? true,
+            "minimalAddressBar": d.bool(forKey: "MinimalAddressBar"),
             "autofillEnabled": Autofill.isEnabled,
             "confirmationToasts": d.object(forKey: "ConfirmationToasts") as? Bool ?? true,
             "downloadDir": DownloadManager.destinationDirectory.path,
@@ -185,6 +188,21 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
         case "centeredLocationBar":
             if let b = value as? Bool {
                 d.set(b, forKey: "CenteredLocationBar")
+                (NSApp.delegate as? AppDelegate)?.refreshAllChrome()
+            }
+        case "zenMode":
+            if let b = value as? Bool {
+                // setZenMode writes the pref itself + animates/toasts per window.
+                (NSApp.delegate as? AppDelegate)?.setZenModeAll(b)
+            }
+        case "autoHideSingleTab":
+            if let b = value as? Bool {
+                d.set(b, forKey: "AutoHideSingleTab")
+                (NSApp.delegate as? AppDelegate)?.refreshAllChrome()
+            }
+        case "minimalAddressBar":
+            if let b = value as? Bool {
+                d.set(b, forKey: "MinimalAddressBar")
                 (NSApp.delegate as? AppDelegate)?.refreshAllChrome()
             }
         case "autofillEnabled":

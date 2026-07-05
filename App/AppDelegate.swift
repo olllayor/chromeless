@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
-        UserDefaults.standard.register(defaults: ["NewTabNextToActive": true, "RoundedFrame": true])
+        UserDefaults.standard.register(defaults: ["NewTabNextToActive": true, "RoundedFrame": true, "AutoHideSingleTab": true])
         ContentBlocker.shared.prepare()
         buildMenu()
 
@@ -76,6 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Re-apply theme-driven chrome across every open window (rounded frame, accent).
     func refreshAllChrome() {
         controllers.forEach { $0.applyChromeSettings() }
+    }
+
+    /// Toggle zen/frameless mode across every open window (from the settings page).
+    func setZenModeAll(_ on: Bool) {
+        controllers.forEach { $0.setZenMode(enabled: on) }
     }
 
     /// Enable/disable content blocking across every open tab. Shared by the View
@@ -214,6 +219,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let fullScreen = viewMenu.addItem(withTitle: "Enter Full Screen",
                                           action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f")
         fullScreen.keyEquivalentModifierMask = [.command, .control]
+        // Uppercase "L" implies Shift → matches ⌘⇧L (⌘L is Open Location).
+        viewMenu.addItem(withTitle: "Frameless Mode",
+                         action: #selector(BrowserWindowController.toggleZenMode(_:)), keyEquivalent: "L")
         viewMenu.addItem(.separator())
         let blockAds = viewMenu.addItem(withTitle: "Block Ads & Trackers",
                                         action: #selector(toggleContentBlocking(_:)), keyEquivalent: "")

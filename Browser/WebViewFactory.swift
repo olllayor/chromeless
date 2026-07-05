@@ -34,6 +34,9 @@ enum WebViewFactory {
         Autofill.shared.install(on: conf)
         GeolocationBridge.shared.install(on: conf)
         SettingsBridge.shared.install(on: conf)
+        // Hover-link preview (status bubble): report hovered <a> hrefs.
+        conf.userContentController.addUserScript(StatusBubbleRelay.userScript)
+        conf.userContentController.add(StatusBubbleRelay.shared, name: "linkHover")
         return conf
     }
 }

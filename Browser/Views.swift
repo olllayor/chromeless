@@ -160,6 +160,11 @@ final class OverlayRootView: NSView {
 /// focus in the URL bar.
 final class BrowserWindow: NSWindow {
     var isEditingURLField = false
+    // Set for one call to let the app move focus off the URL field intentionally
+    // (e.g. committing a URL on Enter). Without it the steal-guard below — which
+    // exists to block a *page's* element.focus() mid-type — also blocks our own
+    // Enter-commit, trapping focus + the typed text in the field.
+    var forceAllowFocusChange = false
     var currentWebView: (() -> NSView?)?
     // Begin/end-editing notifications don't reliably fire for the URL field, so
     // `isEditingURLField` alone can be stale (false) mid-edit — which disarms the
@@ -170,6 +175,10 @@ final class BrowserWindow: NSWindow {
     var isEditingURLFieldLive: (() -> Bool)?
 
     override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if forceAllowFocusChange {
+            forceAllowFocusChange = false
+            return super.makeFirstResponder(responder)
+        }
         if isEditingURLFieldLive?() ?? isEditingURLField {
             // A loaded page can call element.focus() on any event (commonly the
             // first keystroke), which asks to move first responder off the URL

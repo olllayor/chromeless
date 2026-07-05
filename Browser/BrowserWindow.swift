@@ -33,6 +33,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private var mouseMonitor: Any?
     private var snapJob: SnapJob?
     private var toastHide: DispatchWorkItem?
+    private let statusBubble = StatusBubble()
+    private var statusBubbleHide: DispatchWorkItem?
     private var lastProgress: CGFloat = 0
     private var onStartPage = false
     private var lastHoveredButton: NSButton?
@@ -53,7 +55,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let tabToolbarOverlap: CGFloat = 0
     private let centeredLocationBarMaxWidth: CGFloat = 700
     private let trafficLightInset: CGFloat = 78
-    private var chromeTopHeight: CGFloat { tabBarHeight + toolbarHeight - tabToolbarOverlap }
+    // Manual ⌘-toggle override (View ▸ Hide Tab Bar). Independent of auto-hide.
+    private var manualTabBarHidden = false
+    // Helium "dynamic" layout: a lone tab hides the strip entirely (pure
+    // toolbar + content); opening a 2nd tab brings it back. Default on.
+    private var autoHideSingleTab: Bool {
+        UserDefaults.standard.object(forKey: "AutoHideSingleTab") as? Bool ?? true
+    }
+    /// The tab strip is hidden when manually toggled off, or when auto-hide is on
+    /// and only one tab is open. Drives chrome height + toolbar top inset.
+    private var tabBarHidden: Bool {
+        manualTabBarHidden || (autoHideSingleTab && tabManager.count <= 1)
+    }
+    private var chromeTopHeight: CGFloat {
+        (tabBarHidden ? 0 : tabBarHeight) + toolbarHeight - tabToolbarOverlap
+    }
+
+    // MARK: Zen (Frameless) mode
+    // All top chrome slides out of view for edge-to-edge content; it reveals when
+    // the cursor hits the top edge and slides away shortly after. Helium's
+    // "Frameless mode". Default off — when off, zenSlide stays 1 and every zen
+    // branch is a no-op, so normal chrome is untouched.
+    private var zenModeEnabled: Bool { UserDefaults.standard.bool(forKey: "ZenMode") }
+    private var zenTopPinned: Bool { UserDefaults.standard.bool(forKey: "ZenTopChromePinned") }
+    /// 0 = chrome fully hidden (slid above the top edge), 1 = fully shown.
+    private var zenSlide: CGFloat = 1
+    private var zenRevealed = true
+    private var zenHoverExitTimer: Timer?
+    private var zenAnimTimer: Timer?
+    // Exact Helium constants.
+    private let zenTriggerBand: CGFloat = 6      // top hot-zone thickness
+    private let zenHoverLeeway: CGFloat = 8      // slop around revealed chrome
+    private let zenRevealDuration: TimeInterval = 0.2
+    private let zenHoverExitGrace: TimeInterval = 0.15
     private let tabBar = NSVisualEffectView()
     private let tabBarSeparator = NSView()
     private let tabStack = NSStackView()
@@ -180,6 +214,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabManager.onTabsChanged = { [weak self] in self?.refreshTabBar() }
         refreshTabBar()
 
+        // If zen was left on across launches, start with the chrome hidden.
+        if zenModeEnabled {
+            zenRevealed = zenTopPinned
+            zenSlide = zenTopPinned ? 1 : 0
+            layoutOverlays()
+        }
+
         if let url { navigate(to: url) } else { loadStartPage() }
     }
 
@@ -195,6 +236,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     private var trafficLightsDimmed: Bool?
     private func dimTrafficLights(_ dim: Bool) {
+        // In zen mode the traffic lights fade with the chrome (alpha = zenSlide),
+        // so leave them alone here.
+        guard !zenModeEnabled else { return }
         // Called on every mouseMoved — skip the layer writes unless the state
         // actually flips, so hovering the page doesn't thrash three buttons.
         guard trafficLightsDimmed != dim else { return }
@@ -215,6 +259,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             }
             if event.type == .mouseMoved {
                 let p = self.window!.contentView!.convert(event.locationInWindow, from: nil)
+                if self.zenModeEnabled { self.updateZenReveal(cursorY: p.y) }
                 let nearTopEdge = p.y > self.window!.contentView!.bounds.height - self.chromeTopHeight - 8
                 let nearLeftCorner = p.x < 96
                 self.dimTrafficLights(!(nearTopEdge || nearLeftCorner))
@@ -425,6 +470,15 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         return false
     }
 
+    private var minimalAddressBar: Bool { UserDefaults.standard.bool(forKey: "MinimalAddressBar") }
+
+    /// Bare host for the minimal address bar — drops a leading "www.".
+    private func displayHost(_ url: URL) -> String {
+        var h = url.host ?? url.absoluteString
+        if h.hasPrefix("www.") { h.removeFirst(4) }
+        return h
+    }
+
     private func updateURLField() {
         // Never clobber the field while the user is actively editing it — an
         // async title/url KVO callback landing mid-edit would otherwise reset
@@ -432,7 +486,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         // first responder back to the window.
         guard !isURLFieldEditingNow else { return }
         if let url = webView.url, !onStartPage, url.absoluteString != "about:blank" {
-            urlField.stringValue = url.absoluteString
+            // Minimal address bar (Helium): show just the host when idle; the full
+            // URL comes back on focus (see focusURLField). Off → full URL.
+            urlField.stringValue = minimalAddressBar ? displayHost(url) : url.absoluteString
             // Minimal, centered omnibox (Helium). Focus handlers switch to
             // left-aligned (.natural) while the user is editing.
             urlField.alignment = .center
@@ -461,7 +517,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private func centeredLocationBarFrame(windowWidth: CGFloat, toolbarY: CGFloat) -> NSRect {
         let barH = toolbarHeight - 8
         let barY = toolbarY + 4
-        let navLeading: CGFloat = 12
+        let navLeading: CGFloat = tabBarHidden ? trafficLightInset : 12
         let navBtnSize: CGFloat = 28
         let navBtnGap: CGFloat = 2
         let navWidth = navBtnSize * 3 + navBtnGap * 2
@@ -502,16 +558,36 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     func frameWebView(_ wv: WKWebView) {
         guard let b = window?.contentView?.bounds else { return }
-        let inset: CGFloat = ChromeTheme.roundedFrame ? 8 : 0
-        let radius: CGFloat = ChromeTheme.roundedFrame ? Self.systemWindowRadius : 0
-        wv.frame = NSRect(x: inset, y: inset,
-                          width: b.width - inset * 2,
-                          height: b.height - chromeTopHeight - inset * 2)
-        wv.autoresizingMask = [.width, .height]
+        let contentTop = zenModeEnabled ? 0 : chromeTopHeight
         wv.wantsLayer = true
-        wv.layer?.cornerRadius = radius
+        wv.autoresizingMask = [.width, .height]
         wv.layer?.cornerCurve = .continuous
         wv.layer?.masksToBounds = true
+
+        let allCorners: CACornerMask = [.layerMinXMinYCorner, .layerMaxXMinYCorner,
+                                        .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
+        let bottomCorners: CACornerMask = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+
+        if ChromeTheme.roundedFrame {
+            // "Rounded frame" ON: web content floats as a rounded card, inset
+            // uniformly from the window + chrome, all four corners rounded, with a
+            // hairline edge so the moat around it reads as deliberate (not a seam).
+            let inset: CGFloat = 8
+            wv.frame = NSRect(x: inset, y: inset,
+                              width: b.width - inset * 2,
+                              height: b.height - contentTop - inset * 2)
+            wv.layer?.cornerRadius = 10
+            wv.layer?.maskedCorners = allCorners
+            wv.layer?.borderWidth = 1
+            wv.layer?.borderColor = NSColor.white.withAlphaComponent(0.07).cgColor
+        } else {
+            // OFF: fill edge-to-edge, flush under the chrome; only the bottom
+            // (window-edge) corners round so nothing pokes past the window shape.
+            wv.frame = NSRect(x: 0, y: 0, width: b.width, height: b.height - contentTop)
+            wv.layer?.cornerRadius = Self.systemWindowRadius
+            wv.layer?.maskedCorners = bottomCorners
+            wv.layer?.borderWidth = 0
+        }
     }
 
     /// Re-apply theme-driven chrome (rounded frame, accent) after a settings change.
@@ -521,10 +597,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if urlField.currentEditor() != nil {
             locationBar.layer?.borderColor = ChromeTheme.accent.withAlphaComponent(0.45).cgColor
         }
+        // Reflect a minimal-address-bar toggle immediately.
+        updateURLField()
     }
 
     private func switchToTab(_ tab: Tab) {
         guard let container = window?.contentView else { return }
+        hideStatusBubble()
         if let current = tabManager.current {
             current.webView.removeFromSuperview()
         }
@@ -578,8 +657,86 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     // MARK: Tab Bar
 
     @objc func toggleTabBar(_ sender: Any?) {
-        tabBar.isHidden = !tabBar.isHidden
+        manualTabBarHidden.toggle()
         layoutOverlays()
+    }
+
+    // MARK: Zen (Frameless) mode
+
+    @objc func toggleZenMode(_ sender: Any?) {
+        setZenMode(enabled: !zenModeEnabled)
+    }
+
+    func setZenMode(enabled: Bool) {
+        UserDefaults.standard.set(enabled, forKey: "ZenMode")
+        zenAnimTimer?.invalidate(); zenAnimTimer = nil
+        zenHoverExitTimer?.invalidate(); zenHoverExitTimer = nil
+        if enabled {
+            // Start hidden (revealed only if the user pinned the top bar).
+            zenRevealed = zenTopPinned
+            zenSlide = zenTopPinned ? 1 : 0
+        } else {
+            // Restore normal chrome + full-opacity, clickable traffic lights.
+            zenRevealed = true
+            zenSlide = 1
+            for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+                let btn = window?.standardWindowButton(kind)
+                btn?.alphaValue = 1
+                btn?.isEnabled = true
+            }
+        }
+        layoutOverlays()
+        showToast(enabled ? "Frameless mode on — hover the top edge for chrome" : "Frameless mode off",
+                  symbol: enabled ? "rectangle.dashed" : "rectangle.on.rectangle")
+    }
+
+    /// Reveal-vs-hide decision from the cursor's y (window coords, y-up).
+    /// Called on every mouseMoved while zen is on.
+    private func updateZenReveal(cursorY: CGFloat) {
+        guard zenModeEnabled, let h = window?.contentView?.bounds.height else { return }
+        // Force-show while pinned, editing the omnibox, or a popover/HUD is open.
+        let forceShow = zenTopPinned || isURLFieldEditingNow
+            || (siteSettingsPopover?.isShown ?? false) || !hud.isHidden
+        let inTriggerBand = cursorY >= h - zenTriggerBand
+        let overChrome = zenRevealed && cursorY >= h - chromeTopHeight - zenHoverLeeway
+        if forceShow || inTriggerBand || overChrome {
+            zenHoverExitTimer?.invalidate(); zenHoverExitTimer = nil
+            revealZenChrome(true)
+        } else if zenRevealed && zenHoverExitTimer == nil {
+            // Left the chrome — hide after the short grace period.
+            zenHoverExitTimer = Timer.scheduledTimer(withTimeInterval: zenHoverExitGrace, repeats: false) { [weak self] _ in
+                self?.zenHoverExitTimer = nil
+                self?.revealZenChrome(false)
+            }
+        }
+    }
+
+    private func revealZenChrome(_ reveal: Bool) {
+        guard zenModeEnabled else { return }
+        let target: CGFloat = reveal ? 1 : 0
+        if zenRevealed == reveal && abs(zenSlide - target) < 0.001 { return }
+        zenRevealed = reveal
+        animateZen(to: target)
+    }
+
+    /// Drive zenSlide 0↔1 over zenRevealDuration, relaying out each frame.
+    private func animateZen(to target: CGFloat) {
+        zenAnimTimer?.invalidate()
+        let start = zenSlide
+        guard abs(target - start) > 0.001 else { zenSlide = target; layoutOverlays(); return }
+        let begin = Date()
+        zenAnimTimer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] t in
+            guard let self else { t.invalidate(); return }
+            let e = min(1, Date().timeIntervalSince(begin) / self.zenRevealDuration)
+            let eased = e * e * (3 - 2 * e)   // smoothstep, fast-out/slow-in feel
+            self.zenSlide = start + (target - start) * CGFloat(eased)
+            self.layoutOverlays()
+            if e >= 1 {
+                t.invalidate(); self.zenAnimTimer = nil
+                self.zenSlide = target
+                self.layoutOverlays()
+            }
+        }
     }
 
     /// Attaches a double-click recognizer to a chrome bar so double-clicking an
@@ -677,7 +834,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         addBtn.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")
         addBtn.contentTintColor = .secondaryLabelColor
         addBtn.wantsLayer = true
-        addBtn.layer?.cornerRadius = 6
+        addBtn.layer?.cornerRadius = 8
         addBtn.layer?.cornerCurve = .continuous
         addBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -691,6 +848,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         updateURLField()
         backBtn.isEnabled = webView.canGoBack
         forwardBtn.isEnabled = webView.canGoForward
+        // Tab count may have crossed the auto-hide threshold (1↔2): re-run the
+        // full chrome layout so the strip shows/hides and the toolbar reflows.
+        layoutOverlays()
     }
 
     /// Helium/Chrome behaviour: tabs stretch to share the available width
@@ -925,7 +1085,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         toolbarBar.blendingMode = .withinWindow
         toolbarBar.state = .active
         toolbarBar.wantsLayer = true
-        toolbarBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.06, alpha: 0.94).cgColor
+        // Same tone as the tab strip so the two rows read as one flat chrome block.
+        toolbarBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.075, alpha: 0.94).cgColor
         container.addSubview(toolbarBar)
         // NB: no double-click recognizer on the toolbar — it holds the editable
         // URL field, and an ancestor recognizer swallows the click that focuses
@@ -939,7 +1100,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             btn.contentTintColor = .secondaryLabelColor
             btn.target = self
             btn.action = action
-            btn.layer?.cornerRadius = 6
+            btn.layer?.cornerRadius = 8
             btn.layer?.cornerCurve = .continuous
             self.toolbarBar.addSubview(btn)
         }
@@ -957,7 +1118,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         locationBar.material = .contentBackground
         locationBar.blendingMode = .withinWindow
         locationBar.state = .active
-        locationBar.layer?.cornerRadius = 6
+        // Helium house style: 8px rounded-rect (kHigh), not a full pill.
+        locationBar.layer?.cornerRadius = 8
         locationBar.layer?.cornerCurve = .continuous
         locationBar.layer?.masksToBounds = true
         locationBar.layer?.borderWidth = 0.5
@@ -1014,7 +1176,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabBar.blendingMode = .withinWindow
         tabBar.state = .active
         tabBar.wantsLayer = true
-        tabBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.07, alpha: 0.92).cgColor
+        tabBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.075, alpha: 0.94).cgColor
         container.addSubview(tabBar)
         installTitlebarDoubleClick(on: tabBar)
 
@@ -1202,7 +1364,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         suggestionsView.blendingMode = .withinWindow
         suggestionsView.state = .active
         suggestionsView.wantsLayer = true
-        suggestionsView.layer?.cornerRadius = 9
+        suggestionsView.layer?.cornerRadius = 11
         suggestionsView.layer?.cornerCurve = .continuous
         suggestionsView.layer?.masksToBounds = true
         suggestionsView.layer?.borderWidth = 1
@@ -1212,12 +1374,49 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         suggestionsBacking.wantsLayer = true
         suggestionsBacking.autoresizingMask = [.width, .height]
         suggestionsBacking.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 0.96).cgColor
-        suggestionsBacking.layer?.cornerRadius = 9
+        suggestionsBacking.layer?.cornerRadius = 11
         suggestionsBacking.layer?.cornerCurve = .continuous
         suggestionsView.addSubview(suggestionsBacking)
 
         suggestionsView.addSubview(suggestionsStack)
         container.addSubview(suggestionsView)
+
+        statusBubble.isHidden = true
+        container.addSubview(statusBubble)
+    }
+
+    // MARK: Status bubble (hover link preview)
+
+    func showStatusBubble(_ urlString: String) {
+        statusBubble.text = prettyURL(urlString)
+        statusBubbleHide?.cancel()
+        let wasHidden = statusBubble.isHidden
+        statusBubble.isHidden = false
+        layoutOverlays()   // resize/position for the new text
+        if wasHidden {
+            statusBubble.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                statusBubble.animator().alphaValue = 1
+            }
+        } else {
+            statusBubble.alphaValue = 1
+        }
+    }
+
+    func hideStatusBubble() {
+        guard !statusBubble.isHidden else { return }
+        statusBubbleHide?.cancel()
+        // Small delay so rapid mouseover/out flicker across a link doesn't thrash.
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.12
+                self.statusBubble.animator().alphaValue = 0
+            }, completionHandler: { self.statusBubble.isHidden = true })
+        }
+        statusBubbleHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
     }
 
     private func layoutOverlays() {
@@ -1226,18 +1425,38 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let b = overlayRoot.bounds
         let chromeTop = chromeTopHeight
 
-        let toolbarY = b.height - tabBarHeight - toolbarHeight + tabToolbarOverlap
+        let hideTabs = tabBarHidden
+        let stripHeight = hideTabs ? 0 : tabBarHeight
+        // Zen: as zenSlide goes 1→0 the whole chrome translates up by its own
+        // height until it's parked just above the top edge (off-screen).
+        let zenDY = zenModeEnabled ? (1 - zenSlide) * chromeTopHeight : 0
+        let toolbarY = b.height - stripHeight - toolbarHeight + tabToolbarOverlap + zenDY
         toolbarBar.frame = NSRect(x: 0, y: toolbarY, width: b.width, height: toolbarHeight)
 
-        tabBar.frame = NSRect(x: 0, y: b.height - tabBarHeight, width: b.width, height: tabBarHeight)
+        tabBar.isHidden = hideTabs
+        tabBar.frame = NSRect(x: 0, y: b.height - tabBarHeight + zenDY, width: b.width, height: tabBarHeight)
         tabStack.frame = tabBar.bounds
         updateTabWidths()
-        tabBarSeparator.frame = NSRect(x: 0, y: toolbarY + toolbarHeight - 1, width: b.width, height: 1)
+        // No hairline between tab strip and toolbar — the chrome reads as one
+        // flat block (Helium: group by spacing, not divider lines).
+        tabBarSeparator.isHidden = true
+
+        // Zen: fade the traffic lights in step with the sliding chrome, and gate
+        // their clicks on being (mostly) visible.
+        if zenModeEnabled {
+            for kind: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+                let btn = window?.standardWindowButton(kind)
+                btn?.alphaValue = zenSlide
+                btn?.isEnabled = zenSlide > 0.5
+            }
+        }
 
         let navBtnSize: CGFloat = 28
         let navPad: CGFloat = 12
         let navBtnGap: CGFloat = 2
-        var navX = navPad
+        // With the tab strip hidden the toolbar rises to the very top, where the
+        // traffic lights live — inset the nav buttons past them.
+        var navX = hideTabs ? trafficLightInset : navPad
         for btn in [backBtn, forwardBtn, reloadBtn] {
             btn.frame = NSRect(x: navX, y: (toolbarHeight - navBtnSize) / 2,
                                width: navBtnSize, height: navBtnSize)
@@ -1291,7 +1510,16 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                                  y: b.height - chromeTop - th - margin,
                                  width: tw, height: th)
 
-        progressBar.frame = NSRect(x: 0, y: b.height - chromeTop, width: b.width * lastProgress, height: 2)
+        // Zen hides the chrome, so pin the progress line to the very top edge.
+        let progressY = zenModeEnabled ? b.height - 2 : b.height - chromeTop
+        progressBar.frame = NSRect(x: 0, y: progressY, width: b.width * lastProgress, height: 2)
+
+        if !statusBubble.isHidden {
+            let sbW = statusBubble.fittingWidth(maxWidth: b.width / 3)
+            let sbInset: CGFloat = 8
+            statusBubble.frame = NSRect(x: sbInset, y: sbInset, width: sbW, height: 24)
+            statusBubble.layoutLabel()
+        }
 
         let fbW: CGFloat = 360
         let fbH: CGFloat = 40
@@ -1438,8 +1666,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func hideHUD() {
-        suggestionsView.isHidden = true
-        selectedSuggestionIndex = -1
+        dismissSuggestions()
         NSAnimationContext.runAnimationGroup({ ctx in
             ctx.duration = 0.15
             self.hud.animator().alphaValue = 0
@@ -1471,10 +1698,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func focusURLField() {
-        updateURLField()
-        if urlField.stringValue.isEmpty {
-            urlField.alignment = .natural
+        // In zen the toolbar may be slid off-screen; snap it fully open first so
+        // the field has non-zero height to receive focus (Helium does the same).
+        if zenModeEnabled && zenSlide < 1 {
+            zenAnimTimer?.invalidate(); zenAnimTimer = nil
+            zenRevealed = true
+            zenSlide = 1
+            layoutOverlays()
         }
+        updateURLField()
+        // Editing always operates on the full URL, left-aligned — even when the
+        // idle bar shows only the host (minimal mode).
+        if minimalAddressBar, let u = webView.url, !onStartPage, u.absoluteString != "about:blank" {
+            urlField.stringValue = u.absoluteString
+        }
+        urlField.alignment = .natural
         locationBar.layer?.borderColor = ChromeTheme.accent.withAlphaComponent(0.45).cgColor
         locationBar.layer?.borderWidth = 1
         // Set the flag up front rather than waiting for the (unreliable)
@@ -1512,18 +1750,22 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 return true
             }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-                (window as? BrowserWindow)?.isEditingURLField = false
+                dismissSuggestions()
+                let win = window as? BrowserWindow
+                win?.isEditingURLField = false
+                win?.forceAllowFocusChange = true
                 window?.makeFirstResponder(webView)
                 updateURLField()
-                suggestionsView.isHidden = true
-                selectedSuggestionIndex = -1
                 return true
             }
             if commandSelector == #selector(NSResponder.insertNewline(_:)) {
                 if selectedSuggestionIndex >= 0 && selectedSuggestionIndex < suggestionItems.count {
                     let item = suggestionItems[selectedSuggestionIndex]
-                    suggestionsView.isHidden = true
-                    selectedSuggestionIndex = -1
+                    dismissSuggestions()
+                    let win = window as? BrowserWindow
+                    win?.isEditingURLField = false
+                    win?.forceAllowFocusChange = true
+                    window?.makeFirstResponder(webView)
                     if let url = URL(string: item.url) { navigate(to: url) }
                 } else {
                     commitURLField()
@@ -1571,9 +1813,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             (window as? BrowserWindow)?.isEditingURLField = false
             locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
             locationBar.layer?.borderWidth = 0.5
-            if onStartPage && urlField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
-                updateURLField()
-            }
+            // Revert the field to its idle display (full URL, or host in minimal
+            // mode) — discards any uncommitted text, standard browser behaviour.
+            updateURLField()
         }
     }
 
@@ -1592,9 +1834,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     private func commitURLField() {
         let text = urlField.stringValue
-        (window as? BrowserWindow)?.isEditingURLField = false
+        dismissSuggestions()
+        let win = window as? BrowserWindow
+        win?.isEditingURLField = false
+        win?.forceAllowFocusChange = true   // our own commit — not a page focus-steal
         window?.makeFirstResponder(webView)
-        suggestionsView.isHidden = true
         if let url = smartURL(text) {
             navigate(to: url)
         } else if onStartPage && text.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -1604,6 +1848,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func updateURLSuggestions() {
         loadSuggestions(query: urlField.stringValue.trimmingCharacters(in: .whitespaces), isHUD: false)
+    }
+
+    /// Fully tear down the suggestions dropdown: hide it, cancel any pending
+    /// debounced rebuild, and bump the query token so an in-flight async
+    /// engine-suggest reply can't re-present it after the field is committed.
+    private func dismissSuggestions() {
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(updateURLSuggestions), object: nil)
+        NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(updateSuggestions), object: nil)
+        suggestionQueryToken += 1
+        suggestionsView.isHidden = true
+        selectedSuggestionIndex = -1
     }
 
     /// Builds the suggestion list for `query`: local history first, then — when
@@ -1617,11 +1872,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         suggestionQueryToken += 1
         let token = suggestionQueryToken
 
+        // `!bang` matches lead the list (spark icon + "Ask %@" for AI bangs).
+        let bangs = Bangs.suggestions(for: query).map { s in
+            Suggestion(url: s.url.absoluteString,
+                       title: s.bang.name,
+                       subtitle: (s.bang.category == .ai ? "Ask " : "Search ") + s.bang.name,
+                       isSearch: true)
+        }
         let history = HistoryStore.shared.search(query: query).map {
             Suggestion(url: $0.url, title: $0.title, subtitle: $0.url, isSearch: false)
         }
-        presentSuggestions(history, query: query, isHUD: isHUD) // show history immediately
+        presentSuggestions(bangs + history, query: query, isHUD: isHUD) // show immediately
 
+        // An active bang owns the omnibox — skip remote engine suggestions.
+        guard bangs.isEmpty else { return }
         guard SearchEngine.suggestionsEnabled else { return }
         SearchSuggest.fetch(query) { [weak self] phrases in
             guard let self, token == self.suggestionQueryToken else { return } // stale reply
@@ -1636,7 +1900,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    private static let suggestionRowHeight: CGFloat = 32
+    private static let suggestionRowHeight: CGFloat = 30
 
     /// Renders `list` into the suggestion popover, Helium-style: one line per
     /// row — a leading type icon, the title, then a dimmer trailing detail
@@ -1883,23 +2147,26 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let final = toastView.frame
         toastHide?.cancel()
         toastView.isHidden = false
-        // Slide in from the right edge + fade.
+        // Scale + fade "pop" entrance (Helium), anchored in place at top-right.
+        toastView.setFrameOrigin(final.origin)
         toastView.alphaValue = 0
-        toastView.setFrameOrigin(NSPoint(x: final.origin.x + 18, y: final.origin.y))
+        let pop = CABasicAnimation(keyPath: "transform.scale")
+        pop.fromValue = 0.9
+        pop.toValue = 1.0
+        pop.duration = 0.22
+        pop.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        toastView.layer?.add(pop, forKey: "pop")
         NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.22
+            ctx.duration = 0.2
             ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
             toastView.animator().alphaValue = 1
-            toastView.animator().setFrameOrigin(final.origin)
         }
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            let f = self.toastView.frame
             NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.32
+                ctx.duration = 0.28
                 ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 self.toastView.animator().alphaValue = 0
-                self.toastView.animator().setFrameOrigin(NSPoint(x: f.origin.x + 18, y: f.origin.y))
             }, completionHandler: { self.toastView.isHidden = true })
         }
         toastHide = work
