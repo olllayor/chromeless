@@ -12,6 +12,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     var webView: BrowserWebView
     let tabManager = TabManager()
+    /// Split view (Helium 5.1): two tabs shown side-by-side as rounded panes.
+    /// `nil` = normal single-pane. The active tab is always one of the pair;
+    /// selecting any third tab exits the split.
+    private var splitPair: (Tab, Tab)?
     private let overlayRoot = OverlayRootView()
     private let progressBar = NSView()
     private let hud = NSVisualEffectView()
@@ -281,6 +285,17 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                     last.layer?.animateBackground(to: .clear)
                     self.lastHoveredButton = nil
                 }
+                // Split view: clicking the unfocused pane moves focus to it
+                // (omnibox, tab highlight, border emphasis). The event still
+                // reaches the page, so the click also lands where aimed.
+                if let (l, r) = self.splitPair {
+                    let p = self.window!.contentView!.convert(event.locationInWindow, from: nil)
+                    let inactive = self.tabManager.current?.id == l.id ? r : l
+                    if inactive.webView.frame.contains(p) {
+                        self.switchToTab(inactive)
+                        self.refreshTabBar()
+                    }
+                }
             }
             return event
         }
@@ -443,6 +458,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func closeCurrentTab() {
+        if let cur = tabManager.current { dissolveSplitIfInvolved(cur) }
         ClosedTabStore.push(tabManager.current?.url)
         if tabManager.count <= 1 {
             let oldTab = tabManager.tabs.first
@@ -567,6 +583,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                                         .layerMinXMaxYCorner, .layerMaxXMaxYCorner]
         let bottomCorners: CACornerMask = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
 
+        // Split view: both panes are rounded cards regardless of the
+        // rounded-frame setting; the active pane gets a brighter edge.
+        if let (l, r) = splitPair, wv === l.webView || wv === r.webView {
+            let inset: CGFloat = 8
+            let gap: CGFloat = 8
+            let paneW = floor((b.width - inset * 2 - gap) / 2)
+            let paneH = b.height - contentTop - inset * 2
+            let x = wv === l.webView ? inset : inset + paneW + gap
+            wv.autoresizingMask = []   // explicit frames; layoutOverlays tracks resize
+            wv.frame = NSRect(x: x, y: inset, width: paneW, height: paneH)
+            wv.layer?.cornerRadius = 10
+            wv.layer?.maskedCorners = allCorners
+            wv.layer?.borderWidth = 1
+            let isActive = wv === tabManager.current?.webView
+            wv.layer?.borderColor = NSColor.white.withAlphaComponent(isActive ? 0.22 : 0.07).cgColor
+            return
+        }
+
         if ChromeTheme.roundedFrame {
             // "Rounded frame" ON: web content floats as a rounded card, inset
             // uniformly from the window + chrome, all four corners rounded, with a
@@ -603,16 +637,31 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private func switchToTab(_ tab: Tab) {
         guard let container = window?.contentView else { return }
         hideStatusBubble()
-        if let current = tabManager.current {
-            current.webView.removeFromSuperview()
+        // Selecting a tab outside the split pair leaves split view; the
+        // partner pane's view goes, the normal single-pane flow takes over.
+        if let (l, r) = splitPair, tab.id != l.id, tab.id != r.id {
+            exitSplitView()
         }
-        tabManager.select(tab)
-        tab.webView.alphaValue = 0
-        container.addSubview(tab.webView, positioned: .below, relativeTo: overlayRoot)
-        frameWebView(tab.webView)
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.12
-            tab.webView.animator().alphaValue = 1
+        let inSplit: Bool = {
+            guard let (l, r) = splitPair else { return false }
+            return tab.id == l.id || tab.id == r.id
+        }()
+        if inSplit {
+            // Both pane views stay put — just move focus/emphasis.
+            tabManager.select(tab)
+            layoutOverlays()
+        } else {
+            if let current = tabManager.current {
+                current.webView.removeFromSuperview()
+            }
+            tabManager.select(tab)
+            tab.webView.alphaValue = 0
+            container.addSubview(tab.webView, positioned: .below, relativeTo: overlayRoot)
+            frameWebView(tab.webView)
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                tab.webView.animator().alphaValue = 1
+            }
         }
         webView = tab.webView
         window?.title = tab.title.isEmpty ? "Chromeless" : tab.title
@@ -661,6 +710,53 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     @objc func toggleTabBar(_ sender: Any?) {
         manualTabBarHidden.toggle()
         layoutOverlays()
+    }
+
+    // MARK: Split view
+
+    /// View ▸ Split View (⌘⇧E): pair the active tab with the next one in the
+    /// strip; toggling while split exits.
+    @objc func toggleSplitView(_ sender: Any?) {
+        if splitPair != nil {
+            exitSplitView()
+            layoutOverlays()
+            return
+        }
+        guard tabManager.count > 1, let cur = tabManager.current else {
+            showToast("Split view needs two tabs", symbol: "rectangle.split.2x1")
+            return
+        }
+        let other = tabManager.tabs[(tabManager.currentIndex + 1) % tabManager.count]
+        enterSplitView(with: other)
+    }
+
+    /// Pair `tab` with the active tab (active on the left).
+    private func enterSplitView(with tab: Tab) {
+        guard let container = window?.contentView,
+              let cur = tabManager.current, cur.id != tab.id else { return }
+        splitPair = (cur, tab)
+        container.addSubview(tab.webView, positioned: .below, relativeTo: overlayRoot)
+        layoutOverlays()
+        showToast("Split view — click a pane to focus it", symbol: "rectangle.split.2x1")
+    }
+
+    /// Tear down the split: keep the active tab's view (single-pane flow owns
+    /// it), drop the partner pane's view.
+    private func exitSplitView() {
+        guard let (l, r) = splitPair else { return }
+        splitPair = nil
+        let cur = tabManager.current
+        for t in [l, r] where t.id != cur?.id { t.webView.removeFromSuperview() }
+    }
+
+    /// Close paths must dissolve the split first, or a closed partner pane's
+    /// web view would be orphaned in the view hierarchy.
+    private func dissolveSplitIfInvolved(_ tab: Tab) {
+        guard let (l, r) = splitPair else { return }
+        if tab.id == l.id || tab.id == r.id {
+            exitSplitView()
+            layoutOverlays()
+        }
     }
 
     // MARK: Zen (Frameless) mode
@@ -882,6 +978,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let idx = sender.tag
         guard idx < tabManager.count else { return }
         let tab = tabManager.tabs[idx]
+        dissolveSplitIfInvolved(tab)
         if tabManager.count == 1 {
             window?.close()
         } else {
@@ -913,12 +1010,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             .representedObject = tab
         let copyItem = menu.addItem(withTitle: "Copy URL", action: #selector(copyTabURL(_:)), keyEquivalent: "")
         copyItem.representedObject = tab
+        // Pair this tab with the active one (no-op offer on the active tab itself).
+        if splitPair != nil {
+            menu.addItem(withTitle: "Exit Split View", action: #selector(toggleSplitView(_:)), keyEquivalent: "")
+        } else if tab.id != tabManager.current?.id {
+            menu.addItem(withTitle: "Open in Split View", action: #selector(splitWithTab(_:)), keyEquivalent: "")
+                .representedObject = tab
+        }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close Tab", action: #selector(closeTabFromContext(_:)), keyEquivalent: "w")
             .representedObject = tab
         let closeOthers = menu.addItem(withTitle: "Close Other Tabs", action: #selector(closeOtherTabs(_:)), keyEquivalent: "")
         closeOthers.representedObject = tab
         return menu
+    }
+
+    @objc private func splitWithTab(_ sender: NSMenuItem) {
+        guard let tab = sender.representedObject as? Tab else { return }
+        enterSplitView(with: tab)
     }
 
     @objc private func duplicateTab(_ sender: NSMenuItem) {
@@ -935,6 +1044,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func closeTabFromContext(_ sender: NSMenuItem) {
         guard let tab = sender.representedObject as? Tab else { return }
+        dissolveSplitIfInvolved(tab)
         ClosedTabStore.push(tab.url)
         if tabManager.count == 1 {
             window?.close()
@@ -946,6 +1056,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func closeOtherTabs(_ sender: NSMenuItem) {
         guard let keepTab = sender.representedObject as? Tab else { return }
+        if splitPair != nil { exitSplitView(); layoutOverlays() }
         let toClose = tabManager.tabs.filter { $0.id != keepTab.id }
         for tab in toClose { ClosedTabStore.push(tab.url); tab.webView.removeFromSuperview() }
         tabManager.closeAll(except: keepTab)
@@ -1499,7 +1610,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                                 width: max(0, locationBar.frame.width - urlX * 2),
                                 height: fieldH)
 
-        frameWebView(webView)
+        if let (l, r) = splitPair {
+            frameWebView(l.webView)
+            frameWebView(r.webView)
+        } else {
+            frameWebView(webView)
+        }
 
         hudW = min(620, max(280, b.width - 48))
         let hudH: CGFloat = 52
@@ -2474,6 +2590,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         case #selector(togglePin(_:)):
             menuItem.state = window?.level == .floating ? .on : .off
             return true
+        case #selector(toggleSplitView(_:)):
+            menuItem.state = splitPair != nil ? .on : .off
+            return splitPair != nil || tabManager.count > 1
         default: return true
         }
     }

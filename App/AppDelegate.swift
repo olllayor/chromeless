@@ -230,6 +230,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Uppercase "L" implies Shift → matches ⌘⇧L (⌘L is Open Location).
         viewMenu.addItem(withTitle: "Frameless Mode",
                          action: #selector(BrowserWindowController.toggleZenMode(_:)), keyEquivalent: "L")
+        // Uppercase "E" → ⌘⇧E. Pairs the active tab with the next one.
+        viewMenu.addItem(withTitle: "Split View",
+                         action: #selector(BrowserWindowController.toggleSplitView(_:)), keyEquivalent: "E")
         viewMenu.addItem(.separator())
         let blockAds = viewMenu.addItem(withTitle: "Block Ads & Trackers",
                                         action: #selector(toggleContentBlocking(_:)), keyEquivalent: "")
