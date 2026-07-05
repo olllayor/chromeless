@@ -265,7 +265,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 self.dimTrafficLights(!(nearTopEdge || nearLeftCorner))
 
                 // Nav button hover
-                let navBtns = [self.backBtn, self.forwardBtn, self.reloadBtn]
+                let navBtns = [self.backBtn, self.forwardBtn, self.reloadBtn, self.downloadsButton]
                 let hit = navBtns.first { btn in
                     let f = btn.convert(btn.bounds, to: nil)
                     return f.contains(p) && !btn.isHidden
@@ -412,8 +412,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     func newTab(url: URL? = nil, background: Bool = false) {
-        let conf = WebViewFactory.makeConfiguration()
-        let wv = BrowserWebView(frame: .zero, configuration: conf)
+        let wv = WebViewFactory.dequeueWebView()
         let tab = Tab(webView: wv)
         if UserDefaults.standard.bool(forKey: "NewTabNextToActive") {
             let insertIndex = tabManager.currentIndex + 1
@@ -448,7 +447,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if tabManager.count <= 1 {
             let oldTab = tabManager.tabs.first
             oldTab?.webView.removeFromSuperview()
-            let newTab = Tab(webView: BrowserWebView(frame: .zero, configuration: WebViewFactory.makeConfiguration()))
+            let newTab = Tab(webView: WebViewFactory.dequeueWebView())
             tabManager.replaceAll(with: newTab)
             switchToTab(newTab)
             loadStartPage()
@@ -622,10 +621,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             webView.observe(\.estimatedProgress, options: [.new]) { [weak self] wv, _ in
                 self?.progressChanged(wv.estimatedProgress)
             },
+            // Title changes only need the window title — each TabBarItem keeps
+            // its own live title observer (see refreshTabBar), so a full strip
+            // rebuild here (views + observers + favicon refetch for every tab,
+            // several times per page load) was pure waste.
             webView.observe(\.title) { [weak self] wv, _ in
                 let t = wv.title ?? ""
                 self?.window?.title = t.isEmpty ? "Chromeless" : t
-                self?.refreshTabBar()
             },
             webView.observe(\.url) { [weak self] wv, _ in
                 if let u = wv.url, u.scheme == "https" || u.scheme == "http" {
@@ -828,14 +830,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 }
             }
         }
-        let addBtn = NSButton(title: "", target: self, action: #selector(newTabFromBar(_:)))
+        let addBtn = HoverIconButton(frame: .zero)
+        addBtn.title = ""
+        addBtn.target = self
+        addBtn.action = #selector(newTabFromBar(_:))
         addBtn.bezelStyle = .inline
         addBtn.isBordered = false
         addBtn.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "New tab")
         addBtn.contentTintColor = .secondaryLabelColor
-        addBtn.wantsLayer = true
-        addBtn.layer?.cornerRadius = 8
-        addBtn.layer?.cornerCurve = .continuous
         addBtn.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             addBtn.widthAnchor.constraint(equalToConstant: 28),
@@ -1085,8 +1087,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         toolbarBar.blendingMode = .withinWindow
         toolbarBar.state = .active
         toolbarBar.wantsLayer = true
-        // Same tone as the tab strip so the two rows read as one flat chrome block.
-        toolbarBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.075, alpha: 0.94).cgColor
+        // Same tone as the tab strip so the two rows read as one flat chrome
+        // block — Helium's kColorSysHeader (#1E2020) for both rows.
+        toolbarBar.layer?.backgroundColor = ChromeTheme.chromeSurface.withAlphaComponent(0.94).cgColor
         container.addSubview(toolbarBar)
         // NB: no double-click recognizer on the toolbar — it holds the editable
         // URL field, and an ancestor recognizer swallows the click that focuses
@@ -1124,7 +1127,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         locationBar.layer?.masksToBounds = true
         locationBar.layer?.borderWidth = 0.5
         locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
-        locationBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.17, alpha: 1).cgColor
+        // Helium: the omnibox and the active tab share one surface tone.
+        locationBar.layer?.backgroundColor = ChromeTheme.activeSurface.cgColor
         container.addSubview(locationBar)
 
         locationIcon.isBordered = false
@@ -1176,7 +1180,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabBar.blendingMode = .withinWindow
         tabBar.state = .active
         tabBar.wantsLayer = true
-        tabBar.layer?.backgroundColor = NSColor(calibratedWhite: 0.075, alpha: 0.94).cgColor
+        tabBar.layer?.backgroundColor = ChromeTheme.chromeSurface.withAlphaComponent(0.94).cgColor
         container.addSubview(tabBar)
         installTitlebarDoubleClick(on: tabBar)
 
@@ -1388,6 +1392,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     // MARK: Status bubble (hover link preview)
 
     func showStatusBubble(_ urlString: String) {
+        // Settings ▸ General ▸ Features: link preview bubble (default on).
+        guard UserDefaults.standard.object(forKey: "LinkPreviewBubble") as? Bool ?? true else { return }
         var display = prettyURL(urlString)
         if display.hasPrefix("www.") { display.removeFirst(4) }
         statusBubble.text = display
@@ -1588,10 +1594,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             webView.observe(\.estimatedProgress, options: [.new]) { [weak self] wv, _ in
                 self?.progressChanged(wv.estimatedProgress)
             },
+            // Title changes only need the window title — each TabBarItem keeps
+            // its own live title observer (see refreshTabBar), so a full strip
+            // rebuild here (views + observers + favicon refetch for every tab,
+            // several times per page load) was pure waste.
             webView.observe(\.title) { [weak self] wv, _ in
                 let t = wv.title ?? ""
                 self?.window?.title = t.isEmpty ? "Chromeless" : t
-                self?.refreshTabBar()
             },
             webView.observe(\.url) { [weak self] wv, _ in
                 if let u = wv.url, u.scheme == "https" || u.scheme == "http" {

@@ -22,6 +22,55 @@ final class SuggestionRow: NSView {
     override func mouseUp(with event: NSEvent) {
         _ = clickTarget?.perform(clickAction, with: self)
     }
+
+    // Pointer hover eases a soft fill in/out — same feel as tab items. The
+    // keyboard ↑↓ highlight (accent tint, set by the controller) simply paints
+    // over this; both clear to transparent.
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.animateBackground(to: NSColor.white.withAlphaComponent(0.07).cgColor)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.animateBackground(to: NSColor.clear.cgColor)
+    }
+}
+
+/// Icon button with the standard chrome hover treatment: rounded-rect soft
+/// fill that eases in/out. Used where the global mouse monitor doesn't reach
+/// (views that are rebuilt, like the tab strip's "+").
+final class HoverIconButton: NSButton {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.cornerRadius = 8
+        layer?.cornerCurve = .continuous
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach { removeTrackingArea($0) }
+        addTrackingArea(NSTrackingArea(rect: bounds,
+                                       options: [.mouseEnteredAndExited, .activeInKeyWindow],
+                                       owner: self, userInfo: nil))
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        layer?.animateBackground(to: NSColor.white.withAlphaComponent(0.12).cgColor)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        layer?.animateBackground(to: NSColor.clear.cgColor)
+    }
 }
 // MARK: - Views
 

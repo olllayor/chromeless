@@ -24,7 +24,8 @@ let settingsHTML = """
                font-size:15px; font-weight:640; letter-spacing:-.01em; }
   nav .brand .dot { width:9px; height:9px; border-radius:50%; background:var(--accent); }
   nav a { display:flex; align-items:center; gap:11px; padding:9px 11px; border-radius:9px;
-          color:var(--dim2); text-decoration:none; font-size:13.5px; font-weight:500; margin-bottom:3px; }
+          color:var(--dim2); text-decoration:none; font-size:13.5px; font-weight:500; margin-bottom:3px;
+          transition:background .15s ease, color .15s ease; }
   nav a svg { width:19px; height:19px; fill:currentColor; opacity:.85; flex:0 0 19px; }
   nav a.active { background:color-mix(in srgb, var(--accent) 16%, transparent); color:var(--text); }
   nav a.active svg { opacity:1; fill:var(--accent); }
@@ -46,7 +47,9 @@ let settingsHTML = """
   .row .t { font-size:14px; font-weight:500; }
   .row .d { color:var(--dim); font-size:12.5px; margin-top:2px; max-width:400px; }
   select { background:var(--card2); color:var(--text); border:1px solid var(--line);
-           border-radius:9px; padding:7px 11px; font:13px -apple-system; min-width:150px; }
+           border-radius:9px; padding:7px 11px; font:13px -apple-system; min-width:150px;
+           transition:border-color .15s ease; }
+  select:hover { border-color:color-mix(in srgb, var(--accent) 50%, var(--line)); }
   select:focus { outline:none; border-color:var(--accent); }
   /* Toggle */
   .sw { position:relative; width:42px; height:25px; flex:0 0 42px; }
@@ -70,7 +73,8 @@ let settingsHTML = """
   select.mini { min-width:88px; padding:5px 8px; font-size:12px; }
   /* Buttons */
   button { font:13px -apple-system; color:var(--text); background:var(--card2);
-           border:1px solid var(--line); border-radius:9px; padding:7px 14px; cursor:pointer; }
+           border:1px solid var(--line); border-radius:9px; padding:7px 14px; cursor:pointer;
+           transition:border-color .15s ease, color .15s ease, background .15s ease; }
   button:hover { border-color:var(--accent); }
   button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
   button.danger { color:#ff6b64; }
@@ -140,6 +144,25 @@ let settingsHTML = """
         <div><div class="t">Hide the tab bar with one tab</div>
           <div class="d">Show the tab strip only once you have more than one tab. Turn off for classic mode — the tab bar stays visible always.</div></div>
         <label class="sw"><input type="checkbox" id="autoHideSingleTab"><span></span></label>
+      </div>
+    </div>
+
+    <div class="sech"><span>Features</span></div>
+    <div class="card">
+      <div class="row">
+        <div><div class="t">Preload new tabs</div>
+          <div class="d">Keep the next tab pre-built in the background so ⌘T opens instantly. Uses a little extra memory.</div></div>
+        <label class="sw"><input type="checkbox" id="prewarmTabs"><span></span></label>
+      </div>
+      <div class="row">
+        <div><div class="t">!Bang shortcuts</div>
+          <div class="d">Type !w, !gh, !yt… in the address bar to search a site directly. Resolved locally — no third party sees the query.</div></div>
+        <label class="sw"><input type="checkbox" id="bangs"><span></span></label>
+      </div>
+      <div class="row">
+        <div><div class="t">Link preview bubble</div>
+          <div class="d">Show the target URL in a bubble at the bottom-left when hovering a link.</div></div>
+        <label class="sw"><input type="checkbox" id="linkPreview"><span></span></label>
       </div>
     </div>
   </section>
@@ -322,6 +345,9 @@ let settingsHTML = """
       document.getElementById('blockAds').checked = s.blockAds;
       document.getElementById('autofillEnabled').checked = s.autofillEnabled;
       document.getElementById('confirmationToasts').checked = s.confirmationToasts;
+      document.getElementById('prewarmTabs').checked = s.prewarmTabs;
+      document.getElementById('bangs').checked = s.bangs;
+      document.getElementById('linkPreview').checked = s.linkPreview;
       document.getElementById('dlPath').textContent = s.downloadDir;
       document.getElementById('version').textContent = 'Version ' + s.version;
       paintSwatches(s.colorScheme);
@@ -330,7 +356,7 @@ let settingsHTML = """
 
   document.getElementById('searchEngine').onchange = function (e){ send('set','searchEngine', e.target.value); };
   document.getElementById('defaultZoom').onchange = function (e){ send('set','defaultZoom', parseFloat(e.target.value)); };
-  ['searchSuggestions','newTabNextToActive','restoreTabs','roundedFrame','centeredLocationBar','zenMode','autoHideSingleTab','minimalAddressBar','blockAds','autofillEnabled','confirmationToasts'].forEach(function (id) {
+  ['searchSuggestions','newTabNextToActive','restoreTabs','roundedFrame','centeredLocationBar','zenMode','autoHideSingleTab','minimalAddressBar','blockAds','autofillEnabled','confirmationToasts','prewarmTabs','bangs','linkPreview'].forEach(function (id) {
     document.getElementById(id).onchange = function (e){ send('set', id, e.target.checked); };
   });
   document.querySelectorAll('.swatch').forEach(function (s) {

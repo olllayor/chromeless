@@ -43,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         NSApp.activate(ignoringOtherApps: true)
 
+        // Bank a pre-built web view once launch settles so the first ⌘T is
+        // instant (config + view alloc off the critical path).
+        DispatchQueue.main.async { WebViewFactory.prewarm() }
+
         if launchOptions.snap != nil {
             DispatchQueue.main.asyncAfter(deadline: .now() + 30) {
                 fputs("chromeless: --snap timed out\n", stderr)
@@ -90,6 +94,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             wc.tabManager.tabs.map { $0.webView.configuration.userContentController }
         }
         ContentBlocker.shared.setEnabled(on, controllers: controllers)
+        // The banked spare web view was configured under the old blocking
+        // state — rebuild it so the next tab matches.
+        WebViewFactory.discardSpare()
+        WebViewFactory.prewarm()
     }
 
     @objc func openSettings(_ sender: Any?) {

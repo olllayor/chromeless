@@ -37,6 +37,12 @@ struct Bang {
 }
 
 enum Bangs {
+    /// Settings ▸ General ▸ Features toggle. Off → no bang resolution and no
+    /// bang suggestion rows; `!w cats` falls through to a plain search.
+    static var enabled: Bool {
+        UserDefaults.standard.object(forKey: "BangsEnabled") as? Bool ?? true
+    }
+
     /// Curated starter set of the most-used bangs. Bundled (no network), so
     /// they work regardless of the default engine. Extend freely.
     static let all: [Bang] = [
@@ -85,7 +91,7 @@ enum Bangs {
 
     /// Resolve an input string to a bang's URL, or nil if it isn't a bang.
     static func resolve(_ input: String) -> URL? {
-        guard let (bang, query) = split(input) else { return nil }
+        guard enabled, let (bang, query) = split(input) else { return nil }
         let trimmed = query.trimmingCharacters(in: .whitespaces)
         if trimmed.isEmpty { return URL(string: bang.home) }
         let q = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
@@ -102,6 +108,7 @@ enum Bangs {
     /// the bare `!prefix` lists matching triggers to complete. Empty when the
     /// input has no `!token`.
     static func suggestions(for input: String, limit: Int = 5) -> [Suggestion] {
+        guard enabled else { return [] }
         let words = input.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
         guard let idx = words.firstIndex(where: { $0.hasPrefix("!") }) else { return [] }
         let prefix = String(words[idx].dropFirst()).lowercased()

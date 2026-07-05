@@ -404,9 +404,10 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
     }
 
     func updateAppearance() {
-        // Helium: active tab is a lighter "surface" pill that floats above the
-        // darker tab strip — not near-black. Matches the URL pill's surface tone.
-        let activeSurface = NSColor(calibratedWhite: 0.17, alpha: 1)
+        // Helium: active tab is the omnibox-container surface floating above
+        // the darker strip; inactive hover is that same surface at 45% alpha
+        // (kTabInactiveHoverAlpha) — see ChromeTheme.
+        let activeSurface = ChromeTheme.activeSurface
         let bg: CGColor
         if isSelected {
             bg = activeSurface.cgColor
@@ -414,7 +415,7 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
             closeButton.contentTintColor = .secondaryLabelColor
             titleLabel.textColor = .labelColor
         } else if isHovered {
-            bg = NSColor.white.withAlphaComponent(0.08).cgColor
+            bg = activeSurface.withAlphaComponent(ChromeTheme.tabHoverAlpha).cgColor
             closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "Close tab")
             closeButton.contentTintColor = .secondaryLabelColor
             titleLabel.textColor = .labelColor

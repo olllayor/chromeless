@@ -36,6 +36,9 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
             "minimalAddressBar": d.bool(forKey: "MinimalAddressBar"),
             "autofillEnabled": Autofill.isEnabled,
             "confirmationToasts": d.object(forKey: "ConfirmationToasts") as? Bool ?? true,
+            "prewarmTabs": WebViewFactory.prewarmEnabled,
+            "bangs": Bangs.enabled,
+            "linkPreview": d.object(forKey: "LinkPreviewBubble") as? Bool ?? true,
             "downloadDir": DownloadManager.destinationDirectory.path,
             "version": (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1.0",
         ]
@@ -209,6 +212,15 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
             if let b = value as? Bool { d.set(b, forKey: "AutofillEnabled") }
         case "confirmationToasts":
             if let b = value as? Bool { d.set(b, forKey: "ConfirmationToasts") }
+        case "prewarmTabs":
+            if let b = value as? Bool {
+                d.set(b, forKey: "PrewarmTabs")
+                if b { WebViewFactory.prewarm() } else { WebViewFactory.discardSpare() }
+            }
+        case "bangs":
+            if let b = value as? Bool { d.set(b, forKey: "BangsEnabled") }
+        case "linkPreview":
+            if let b = value as? Bool { d.set(b, forKey: "LinkPreviewBubble") }
         default:
             break
         }
