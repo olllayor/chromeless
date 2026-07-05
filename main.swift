@@ -12,6 +12,7 @@
 //   chromeless https://example.com --snap out.png --size 1440x900 --wait 2
 
 import Cocoa
+import LocalAuthentication
 import Security
 import WebKit
 
@@ -128,6 +129,7 @@ enum WebViewFactory {
             conf.userContentController.addUserScript(hideWebAuthn)
         }
         ContentBlocker.shared.apply(to: conf.userContentController)
+        Autofill.shared.install(on: conf)
         return conf
     }
 }
@@ -789,6 +791,80 @@ final class DownloadRow: NSView {
     }
 }
 
+/// Compact pill button used by the autofill banner. Three looks that match the
+/// app's dark HUD chrome: an accent-filled primary, a subtle translucent
+/// secondary, and a borderless icon (the × dismiss). Runs a stored closure.
+final class PillButton: NSButton {
+    enum Kind { case primary, secondary, icon }
+    var onClick: (() -> Void)?
+    private let kind: Kind
+    private var hovering = false
+
+    init(title: String? = nil, symbol: String? = nil, kind: Kind, onClick: @escaping () -> Void) {
+        self.kind = kind
+        super.init(frame: .zero)
+        self.onClick = onClick
+        target = self
+        action = #selector(fire)
+        isBordered = false
+        bezelStyle = .inline
+        wantsLayer = true
+        layer?.cornerRadius = kind == .icon ? 6 : 7
+        layer?.cornerCurve = .continuous
+        if let symbol {
+            image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+            imagePosition = .imageOnly
+        }
+        if let title { setTitle(title) }
+        refresh()
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func setTitle(_ t: String) {
+        let p = NSMutableParagraphStyle(); p.alignment = .center
+        let color: NSColor = kind == .primary ? .white : .labelColor
+        attributedTitle = NSAttributedString(string: t, attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
+            .foregroundColor: color,
+            .paragraphStyle: p,
+        ])
+    }
+
+    override var intrinsicContentSize: NSSize {
+        if kind == .icon { return NSSize(width: 22, height: 22) }
+        var s = super.intrinsicContentSize
+        s.width += 22
+        s.height = 24
+        return s
+    }
+
+    private func refresh() {
+        switch kind {
+        case .primary:
+            layer?.backgroundColor = NSColor.controlAccentColor
+                .withAlphaComponent(hovering ? 1.0 : 0.9).cgColor
+        case .secondary:
+            layer?.backgroundColor = NSColor.white
+                .withAlphaComponent(hovering ? 0.16 : 0.09).cgColor
+        case .icon:
+            layer?.backgroundColor = (hovering ? NSColor.white.withAlphaComponent(0.12) : .clear).cgColor
+            contentTintColor = hovering ? .secondaryLabelColor : .tertiaryLabelColor
+        }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: bounds,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self, userInfo: nil))
+    }
+    override func mouseEntered(with e: NSEvent) { hovering = true; refresh() }
+    override func mouseExited(with e: NSEvent) { hovering = false; refresh() }
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .pointingHand) }
+    @objc private func fire() { onClick?() }
+}
+
 // MARK: - Per-site zoom persistence
 
 enum ZoomStore {
@@ -820,6 +896,238 @@ enum ClosedTabStore {
     }
 
     static func pop() -> URL? { stack.popLast() }
+}
+
+// MARK: - Password vault (Keychain)
+//
+// Login credentials live only in the login keychain as kSecClassInternetPassword
+// items, keyed by host. Local-to-this-device (kSecAttrAccessibleWhenUnlocked-
+// ThisDeviceOnly) — no iCloud sync in this tier, no keychain-access-groups
+// entitlement, so it works on an ad-hoc-signed build. This is the only path a
+// third-party macOS WKWebView has: Safari's native AutoFill and the system
+// Passwords app are not vended to us.
+enum Vault {
+    struct Credential { let username: String; let password: String }
+
+    private static func query(host: String, account: String? = nil) -> [String: Any] {
+        var q: [String: Any] = [
+            kSecClass as String: kSecClassInternetPassword,
+            kSecAttrServer as String: host,
+        ]
+        if let account { q[kSecAttrAccount as String] = account }
+        return q
+    }
+
+    /// Upsert a credential for host+username.
+    @discardableResult
+    static func save(host: String, username: String, password: String) -> Bool {
+        guard let data = password.data(using: .utf8) else { return false }
+        let base = query(host: host, account: username)
+        let update = SecItemUpdate(base as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if update == errSecSuccess { return true }
+        if update == errSecItemNotFound {
+            var add = base
+            add[kSecValueData as String] = data
+            add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
+            return SecItemAdd(add as CFDictionary, nil) == errSecSuccess
+        }
+        return false
+    }
+
+    /// All stored credentials for a host. Done in two steps because the macOS
+    /// file keychain rejects kSecMatchLimitAll combined with kSecReturnData
+    /// (errSecParam): first list the accounts (attributes only), then fetch each
+    /// password with a single-item query.
+    static func lookup(host: String) -> [Credential] {
+        var q = query(host: host)
+        q[kSecMatchLimit as String] = kSecMatchLimitAll
+        q[kSecReturnAttributes as String] = true
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let items = out as? [[String: Any]] else { return [] }
+        return items.compactMap { item -> Credential? in
+            guard let acct = item[kSecAttrAccount as String] as? String,
+                  let pw = password(host: host, account: acct) else { return nil }
+            return Credential(username: acct, password: pw)
+        }
+    }
+
+    /// Fetch a single password value for host+account.
+    private static func password(host: String, account: String) -> String? {
+        var q = query(host: host, account: account)
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        q[kSecReturnData as String] = true
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let data = out as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    static func delete(host: String, username: String) {
+        SecItemDelete(query(host: host, account: username) as CFDictionary)
+    }
+}
+
+// MARK: - Autofill bridge (JS ⇄ native)
+
+/// Injects a content script that detects login forms, offers to save on submit,
+/// and fills fields on request. The native side trusts the frame's real
+/// securityOrigin (never a JS-supplied URL) so a hostile sub-frame can't phish
+/// another origin's credentials.
+final class Autofill: NSObject, WKScriptMessageHandler {
+    static let shared = Autofill()
+    static let messageName = "clPasswordBridge"
+
+    func install(on config: WKWebViewConfiguration) {
+        let ucc = config.userContentController
+        ucc.add(self, name: Self.messageName)
+        ucc.addUserScript(WKUserScript(source: Self.script,
+                                       injectionTime: .atDocumentEnd,
+                                       forMainFrameOnly: false))
+    }
+
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any],
+              let action = body["action"] as? String,
+              let webView = message.webView else { return }
+        let origin = message.frameInfo.securityOrigin
+        let scheme = origin.`protocol`
+        guard !origin.host.isEmpty, scheme == "https" || scheme == "http" else { return }
+        let host = origin.host
+        guard let controller = webView.window?.windowController as? BrowserWindowController else { return }
+
+        switch action {
+        case "submit":
+            guard let u = body["username"] as? String,
+                  let p = body["password"] as? String, !p.isEmpty else { return }
+            // Don't nag if this exact pair is already stored.
+            if Vault.lookup(host: host).contains(where: { $0.username == u && $0.password == p }) { return }
+            controller.promptSavePassword(host: host, username: u, password: p)
+        case "requestFill":
+            let matches = Vault.lookup(host: host)
+            guard !matches.isEmpty else { return }
+            controller.promptFill(host: host, matches: matches, webView: webView, frame: message.frameInfo)
+        default:
+            break
+        }
+    }
+
+    /// Touch ID gate, then inject the credential into the requesting frame.
+    static func authenticateAndFill(_ cred: Vault.Credential, into webView: WKWebView, frame: WKFrameInfo) {
+        let ctx = LAContext()
+        var err: NSError?
+        if ctx.canEvaluatePolicy(.deviceOwnerAuthentication, error: &err) {
+            ctx.evaluatePolicy(.deviceOwnerAuthentication,
+                               localizedReason: "fill your saved password") { ok, _ in
+                guard ok else { return }
+                DispatchQueue.main.async { fill(cred, into: webView, frame: frame) }
+            }
+        } else {
+            fill(cred, into: webView, frame: frame)  // no biometrics/passcode available
+        }
+    }
+
+    private static func fill(_ cred: Vault.Credential, into webView: WKWebView, frame: WKFrameInfo) {
+        let arg: String = {
+            let obj = ["u": cred.username, "p": cred.password]
+            guard let data = try? JSONSerialization.data(withJSONObject: obj),
+                  let s = String(data: data, encoding: .utf8) else { return "{}" }
+            return s
+        }()
+        webView.evaluateJavaScript("window.__clFill && window.__clFill(\(arg));",
+                                   in: frame, in: .page, completionHandler: nil)
+    }
+
+    // Runs in every frame (forMainFrameOnly:false); each frame reports its own origin.
+    private static let script = """
+    (function () {
+      if (window.__clAutofill) return; window.__clAutofill = true;
+      const bridge = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.\(messageName);
+      if (!bridge) return;
+
+      function visible(el){ return !!(el && el.offsetParent !== null && !el.disabled); }
+
+      function findCreds() {
+        const pw = document.querySelector('input[type="password"]');
+        if (!visible(pw)) return null;
+        const fields = Array.prototype.slice.call(
+          document.querySelectorAll('input[type="text"],input[type="email"],input[type="tel"],input:not([type])')
+        ).filter(visible);
+        // Prefer the visible text-ish field just before the password field.
+        let user = fields.filter(function(e){
+          return e.compareDocumentPosition(pw) & Node.DOCUMENT_POSITION_FOLLOWING;
+        }).pop();
+        if (!user) user = fields.find(function(e){
+          return /user|email|login|account/i.test((e.name||'')+' '+(e.id||'')+' '+(e.getAttribute('autocomplete')||''));
+        }) || fields[0] || null;
+        return { user: user, pw: pw, form: pw.form };
+      }
+
+      function setVal(el, v){
+        const proto = (el instanceof HTMLTextAreaElement) ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, v);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+
+      window.__clFill = function(c){
+        const f = findCreds(); if (!f) return;
+        if (f.user && c.u) setVal(f.user, c.u);
+        setVal(f.pw, c.p);
+      };
+
+      function offerSave(){
+        const f = findCreds();
+        if (f && f.pw.value) bridge.postMessage({
+          action: 'submit',
+          username: f.user ? f.user.value : '',
+          password: f.pw.value
+        });
+      }
+
+      document.addEventListener('submit', function(e){
+        const f = findCreds();
+        if (f && f.form === e.target) offerSave();
+      }, true);
+
+      // Many logins are XHR/JS with no real submit — also watch the click.
+      document.addEventListener('click', function(e){
+        const t = e.target.closest && e.target.closest('button,input[type=submit],[role=button]');
+        if (t) setTimeout(offerSave, 0);
+      }, true);
+
+      // Ask native for creds whenever a login form appears. Many sites (cPanel,
+      // SPAs) inject the password field AFTER load, so a one-shot check at
+      // DOMContentLoaded misses it — observe the DOM and re-check, posting only
+      // once per distinct password element.
+      let lastPw = null, pending = false;
+      function maybeRequest(){
+        const f = findCreds();
+        if (f && f.pw !== lastPw) { lastPw = f.pw; bridge.postMessage({ action: 'requestFill' }); }
+      }
+      function scheduleRequest(){
+        if (pending) return;
+        pending = true;
+        setTimeout(function(){ pending = false; maybeRequest(); }, 60);
+      }
+      scheduleRequest();
+      document.addEventListener('DOMContentLoaded', scheduleRequest);
+      try {
+        new MutationObserver(scheduleRequest).observe(
+          document.documentElement, { childList: true, subtree: true });
+      } catch (e) {}
+      // Client-side route changes (SPA) can swap in a fresh login form.
+      ['pushState', 'replaceState'].forEach(function(m){
+        const orig = history[m];
+        if (typeof orig === 'function') history[m] = function(){
+          const r = orig.apply(this, arguments); scheduleRequest(); return r;
+        };
+      });
+      window.addEventListener('popstate', scheduleRequest);
+    })();
+    """
 }
 
 // MARK: - Tabs
@@ -1208,6 +1516,32 @@ final class OverlayRootView: NSView {
     }
 }
 
+/// Window that protects the address bar's focus: while the URL field is being
+/// edited, a web page calling `element.focus()` (common on login pages that
+/// autofocus a field, or re-render) must not steal first responder mid-type.
+/// A genuine user click into the page is still honored so the guard never traps
+/// focus in the URL bar.
+final class BrowserWindow: NSWindow {
+    var isEditingURLField = false
+    var currentWebView: (() -> NSView?)?
+
+    override func makeFirstResponder(_ responder: NSResponder?) -> Bool {
+        if isEditingURLField, let v = responder as? NSView, let wv = currentWebView?(),
+           v === wv || v.isDescendant(of: wv) {
+            // Allow only if the user actively clicked into the page; block
+            // programmatic (keyDown-context or async) focus steals.
+            let userClick: Bool = {
+                switch NSApp.currentEvent?.type {
+                case .leftMouseDown, .leftMouseUp, .rightMouseDown, .otherMouseDown: return true
+                default: return false
+                }
+            }()
+            if !userClick { return false }
+        }
+        return super.makeFirstResponder(responder)
+    }
+}
+
 // MARK: - Browser window
 
 final class BrowserWindowController: NSWindowController, NSWindowDelegate,
@@ -1223,6 +1557,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let hudField = NSTextField()
     private let toastView = NSVisualEffectView()
     private let toastLabel = NSTextField(labelWithString: "")
+    private let autofillBanner = NSVisualEffectView()
+    private let autofillIcon = NSImageView()
+    private let autofillLabel = NSTextField(labelWithString: "")
+    private let autofillStack = NSStackView()
+    private var autofillHide: DispatchWorkItem?
     private var observations: [NSKeyValueObservation] = []
     private var tabItemObservations: [NSKeyValueObservation] = []
     private var tabItemViews: [TabBarItem] = []
@@ -1273,11 +1612,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         snapJob = snap
 
         let contentSize = size ?? NSSize(width: 1160, height: 760)
-        let window = NSWindow(
+        let window = BrowserWindow(
             contentRect: NSRect(origin: .zero, size: contentSize),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered, defer: false)
         super.init(window: window)
+        window.currentWebView = { [weak self] in self?.webView }
 
         window.title = "Chromeless"
         window.titleVisibility = .hidden
@@ -2033,6 +2373,39 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         toastView.addSubview(toastLabel)
         container.addSubview(toastView)
 
+        autofillBanner.material = .hudWindow
+        autofillBanner.blendingMode = .withinWindow
+        autofillBanner.state = .active
+        autofillBanner.wantsLayer = true
+        autofillBanner.layer?.cornerRadius = 12
+        autofillBanner.layer?.cornerCurve = .continuous
+        autofillBanner.layer?.masksToBounds = true
+        autofillBanner.layer?.borderWidth = 1
+        autofillBanner.layer?.borderColor = NSColor.white.withAlphaComponent(0.12).cgColor
+        autofillBanner.isHidden = true
+        autofillBanner.alphaValue = 0
+        autofillIcon.image = NSImage(systemSymbolName: "key.fill", accessibilityDescription: "Password")
+        autofillIcon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 12, weight: .semibold)
+        autofillIcon.contentTintColor = .secondaryLabelColor
+        autofillIcon.setContentHuggingPriority(.required, for: .horizontal)
+        autofillLabel.font = ChromeFont.toast
+        autofillLabel.textColor = .labelColor
+        autofillLabel.lineBreakMode = .byTruncatingTail
+        autofillLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        autofillStack.orientation = .horizontal
+        autofillStack.spacing = 8
+        autofillStack.alignment = .centerY
+        autofillStack.translatesAutoresizingMaskIntoConstraints = false
+        autofillStack.addArrangedSubview(autofillIcon)
+        autofillStack.addArrangedSubview(autofillLabel)
+        autofillBanner.addSubview(autofillStack)
+        NSLayoutConstraint.activate([
+            autofillStack.leadingAnchor.constraint(equalTo: autofillBanner.leadingAnchor, constant: 12),
+            autofillStack.trailingAnchor.constraint(equalTo: autofillBanner.trailingAnchor, constant: -8),
+            autofillStack.centerYAnchor.constraint(equalTo: autofillBanner.centerYAnchor),
+        ])
+        container.addSubview(autofillBanner)
+
         findBar.material = .hudWindow
         findBar.blendingMode = .withinWindow
         findBar.state = .active
@@ -2397,6 +2770,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 return true
             }
             if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+                (window as? BrowserWindow)?.isEditingURLField = false
                 window?.makeFirstResponder(webView)
                 updateURLField()
                 suggestionsView.isHidden = true
@@ -2443,6 +2817,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     func controlTextDidBeginEditing(_ obj: Notification) {
         if obj.object as? NSTextField == urlField {
+            (window as? BrowserWindow)?.isEditingURLField = true
             urlField.alignment = .natural
             locationBar.layer?.borderColor = NSColor.controlAccentColor.withAlphaComponent(0.45).cgColor
             locationBar.layer?.borderWidth = 1
@@ -2451,6 +2826,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     func controlTextDidEndEditing(_ obj: Notification) {
         if obj.object as? NSTextField == urlField {
+            (window as? BrowserWindow)?.isEditingURLField = false
             locationBar.layer?.borderColor = NSColor.white.withAlphaComponent(0.08).cgColor
             locationBar.layer?.borderWidth = 0.5
             if onStartPage && urlField.stringValue.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -2474,6 +2850,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     private func commitURLField() {
         let text = urlField.stringValue
+        (window as? BrowserWindow)?.isEditingURLField = false
         window?.makeFirstResponder(webView)
         suggestionsView.isHidden = true
         if let url = smartURL(text) {
@@ -2568,6 +2945,109 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 ? NSColor.controlAccentColor.withAlphaComponent(0.2).cgColor
                 : NSColor.clear.cgColor
         }
+    }
+
+    // MARK: Autofill prompts
+
+    private struct BannerAction { let title: String; let primary: Bool; let handler: () -> Void }
+
+    func promptSavePassword(host: String, username: String, password: String) {
+        let detail = username.isEmpty ? host : "\(username) · \(host)"
+        showAutofillBanner(title: "Save password?", detail: detail, actions: [
+            BannerAction(title: "Save", primary: true) { [weak self] in
+                Vault.save(host: host, username: username, password: password)
+                self?.showToast("Password saved")
+            },
+        ])
+    }
+
+    func promptFill(host: String, matches: [Vault.Credential], webView: WKWebView, frame: WKFrameInfo) {
+        if matches.count == 1 {
+            let m = matches[0]
+            showAutofillBanner(title: "Sign in as", detail: m.username.isEmpty ? host : m.username,
+                               actions: [BannerAction(title: "Fill", primary: true) {
+                                   Autofill.authenticateAndFill(m, into: webView, frame: frame)
+                               }])
+        } else {
+            // One (secondary) button per account, capped so the pill stays compact.
+            let actions = matches.prefix(3).map { m in
+                BannerAction(title: m.username.isEmpty ? host : m.username, primary: false) {
+                    Autofill.authenticateAndFill(m, into: webView, frame: frame)
+                }
+            }
+            showAutofillBanner(title: "Sign in", detail: nil, actions: Array(actions))
+        }
+    }
+
+    /// Shows a transient, compact HUD pill: key icon, title + detail, styled
+    /// action buttons, and an × dismiss. Auto-hides after 12s.
+    private func showAutofillBanner(title: String, detail: String?, actions: [BannerAction]) {
+        // Compose the label: bright title, dimmer detail on the same line.
+        let text = NSMutableAttributedString(string: title, attributes: [
+            .font: NSFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: NSColor.labelColor,
+        ])
+        if let detail {
+            text.append(NSAttributedString(string: "  " + detail, attributes: [
+                .font: NSFont.systemFont(ofSize: 12),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+        }
+        autofillLabel.attributedStringValue = text
+
+        // Rebuild buttons, keeping the icon + label at the front of the stack.
+        for v in autofillStack.arrangedSubviews where v !== autofillLabel && v !== autofillIcon {
+            autofillStack.removeArrangedSubview(v)
+            v.removeFromSuperview()
+        }
+        for action in actions {
+            let btn = PillButton(title: action.title, kind: action.primary ? .primary : .secondary) { [weak self] in
+                self?.hideAutofillBanner()
+                action.handler()
+            }
+            autofillStack.addArrangedSubview(btn)
+        }
+        let close = PillButton(symbol: "xmark", kind: .icon) { [weak self] in self?.hideAutofillBanner() }
+        autofillStack.addArrangedSubview(close)
+
+        autofillHide?.cancel()
+        autofillBanner.isHidden = false
+        positionAutofillBanner()
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            autofillBanner.animator().alphaValue = 1
+        }
+        let work = DispatchWorkItem { [weak self] in self?.hideAutofillBanner() }
+        autofillHide = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 12, execute: work)
+    }
+
+    private func hideAutofillBanner() {
+        autofillHide?.cancel()
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.25
+            autofillBanner.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in self?.autofillBanner.isHidden = true })
+    }
+
+    private func positionAutofillBanner() {
+        guard let container = autofillBanner.superview else { return }
+        autofillStack.layoutSubtreeIfNeeded()
+        // Sum the arranged widths ourselves — NSStackView.fittingSize squeezes the
+        // low-compression label to ~0, which would collapse the pill.
+        let spacing: CGFloat = 8
+        var content: CGFloat = 0
+        for (i, v) in autofillStack.arrangedSubviews.enumerated() {
+            let vw = (v === autofillLabel)
+                ? ceil(autofillLabel.attributedStringValue.size().width) + 2
+                : v.intrinsicContentSize.width
+            content += vw + (i > 0 ? spacing : 0)
+        }
+        let w = min(container.bounds.width - 40, content + 12 + 8)  // leading + trailing insets
+        let h: CGFloat = 38
+        autofillBanner.frame = NSRect(x: (container.bounds.width - w) / 2,
+                                      y: container.bounds.height - chromeTopHeight - h - 10,
+                                      width: w, height: h)
     }
 
     // MARK: Toast
