@@ -131,6 +131,8 @@ let settingsHTML = """
   <div class="brand"><span class="dot"></span>chromeless</div>
   <a data-s="general" class="active">
     <svg viewBox="0 0 24 24"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg>General</a>
+  <a data-s="accounts">
+    <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>Accounts</a>
   <a data-s="appearance">
     <svg viewBox="0 0 24 24"><path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10c1.38 0 2.5-1.12 2.5-2.5 0-.61-.23-1.2-.64-1.67-.08-.1-.13-.21-.13-.33 0-.28.22-.5.5-.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9zm5.5 11c-.83 0-1.5-.67-1.5-1.5S16.67 10 17.5 10s1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm-3-4C13.67 9 13 8.33 13 7.5S13.67 6 14.5 6s1.5.67 1.5 1.5S15.33 9 14.5 9zM5 11.5C5 10.67 5.67 10 6.5 10S8 10.67 8 11.5 7.33 13 6.5 13 5 12.33 5 11.5zm4-4C9 6.67 9.67 6 10.5 6S12 6.67 12 7.5 11.33 9 10.5 9 9 8.33 9 7.5z"/></svg>Appearance</a>
   <a data-s="accessibility">
@@ -196,6 +198,17 @@ let settingsHTML = """
         <label class="sw"><input type="checkbox" id="linkPreview"><span></span></label>
       </div>
     </div>
+  </section>
+
+  <section id="accounts">
+    <h2>Accounts</h2>
+    <p class="sub">Separate containers, each with its own cookies and logins — sign into
+       two accounts on the same site at once. Tabs are color-tagged.</p>
+    <div style="display:flex; gap:10px; align-items:center; margin-bottom:14px">
+      <button class="primary" id="idNew">New Identity</button>
+      <button class="link" id="idManage">Open full manager →</button>
+    </div>
+    <div class="card list" id="idList"></div>
   </section>
 
   <section id="appearance">
@@ -480,6 +493,62 @@ let settingsHTML = """
     });
   }
 
+  // --- Accounts (identities) ---
+  function idAvatar(i) {
+    var l = i.emoji || (i.name || '?').charAt(0).toUpperCase();
+    return '<span style="display:inline-flex;align-items:center;justify-content:center;' +
+      'width:28px;height:28px;border-radius:50%;background:' + esc(i.color) +
+      ';color:#fff;font-weight:600;font-size:14px;flex:0 0 28px">' + esc(l) + '</span>';
+  }
+  function idBadge(t) {
+    return ' <span style="font-size:10px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;' +
+      'color:var(--dim2);border:1px solid var(--line);border-radius:5px;padding:1px 6px;margin-left:6px">' +
+      esc(t) + '</span>';
+  }
+  function renderIdentities() {
+    request('identityList').then(function (res) {
+      var el = document.getElementById('idList');
+      var rows = (res && res.identities) || [];
+      el.innerHTML = rows.map(function (i) {
+        return '<div class="lrow">' + idAvatar(i) +
+          '<div style="flex:1;min-width:0;margin-left:12px"><div class="host">' + esc(i.name) +
+          (i.isDefault ? idBadge('Default') : '') + (i.ephemeral ? idBadge('Temporary') : '') + '</div>' +
+          (i.email ? '<div class="usr">' + esc(i.email) + '</div>' : '') + '</div>' +
+          '<button class="link" data-gmail="' + esc(i.id) + '">Gmail</button>' +
+          '<button class="link" data-clear="' + esc(i.id) + '">Clear data</button>' +
+          (i.isDefault ? '' : '<button class="icon" title="Delete" data-del="' + esc(i.id) + '">🗑</button>') +
+          '</div>';
+      }).join('');
+      el.querySelectorAll('[data-gmail]').forEach(function (b) {
+        b.onclick = function () { send2('openInIdentity', { id: b.dataset.gmail, url: 'https://mail.google.com/' }); };
+      });
+      el.querySelectorAll('[data-clear]').forEach(function (b) {
+        b.onclick = function () {
+          if (!confirm('Clear all cookies, storage and logins for this container?')) return;
+          var prev = b.textContent; b.textContent = 'Clearing…';
+          request('identityClearData', { id: b.dataset.clear }).then(function () {
+            b.textContent = 'Cleared ✓'; setTimeout(function () { b.textContent = prev; }, 1500);
+          });
+        };
+      });
+      el.querySelectorAll('[data-del]').forEach(function (b) {
+        b.onclick = function () {
+          if (!confirm('Delete this identity? Its tabs close and all its data is erased.')) return;
+          request('identityDelete', { id: b.dataset.del }).then(renderIdentities);
+        };
+      });
+    });
+  }
+  document.getElementById('idNew').onclick = function () {
+    var name = prompt('Name this identity (e.g. Work, Personal, Client):');
+    if (!name || !name.trim()) return;
+    request('identityCreate', { name: name.trim() }).then(function (r) {
+      if (r && r.error) { alert('Could not create identity.'); return; }
+      renderIdentities();
+    });
+  };
+  document.getElementById('idManage').onclick = function () { location.href = 'chromeless://accounts'; };
+
   // --- Downloads ---
   document.getElementById('chooseDir').onclick = function () {
     request('chooseDownloadDir').then(function (res) {
@@ -648,6 +717,7 @@ let settingsHTML = """
   activate = function (name) {
     if (name !== 'shortcuts') cancelRecord(); // never leave a capture armed off-pane
     origActivate(name);
+    if (name === 'accounts' && !loaded.accounts) { loaded.accounts = true; renderIdentities(); }
     if (name === 'privacy' && !loaded.privacy) { loaded.privacy = true; renderPerms(); }
     if (name === 'passwords' && !loaded.passwords) { loaded.passwords = true; renderPasswords(); }
     if (name === 'shortcuts' && !loaded.shortcuts) { loaded.shortcuts = true; renderShortcuts(); }

@@ -160,6 +160,65 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
                 reply(webView, id, ["error": "denied"])
             }
 
+        // --- Identities (chromeless://accounts) ---
+        case "identityList":
+            let rows = IdentityStore.shared.all().map { i -> [String: Any] in
+                ["id": i.id.uuidString, "name": i.name, "color": i.colorHex,
+                 "emoji": i.emoji ?? "", "email": i.googleEmail ?? "",
+                 "isDefault": i.isDefault, "ephemeral": i.ephemeral]
+            }
+            // macOS 13 can't persist non-default containers; the page shows a note.
+            let persistent: Bool = { if #available(macOS 14.0, *) { return true } else { return false } }()
+            reply(webView, id, ["identities": rows, "canPersist": persistent])
+        case "identityCreate":
+            let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces) ?? ""
+            guard !name.isEmpty else { reply(webView, id, ["error": "name"]); return }
+            let i = IdentityStore.shared.create(
+                name: name, colorHex: body["color"] as? String,
+                emoji: (body["emoji"] as? String)?.nilIfEmpty,
+                ephemeral: body["ephemeral"] as? Bool ?? false)
+            reply(webView, id, ["id": i.id.uuidString])
+        case "identityUpdate":
+            guard let s = body["id"] as? String, let uid = UUID(uuidString: s),
+                  var i = IdentityStore.shared.identity(uid) else { reply(webView, id, ["error": "notfound"]); return }
+            if let n = (body["name"] as? String)?.trimmingCharacters(in: .whitespaces), !n.isEmpty { i.name = n }
+            if let c = body["color"] as? String { i.colorHex = c }
+            if let e = body["emoji"] as? String { i.emoji = e.nilIfEmpty }
+            if let em = body["email"] as? String { i.googleEmail = em.nilIfEmpty }
+            IdentityStore.shared.update(i)
+            (NSApp.delegate as? AppDelegate)?.refreshAllTabBars()
+            reply(webView, id, ["ok": true])
+        case "identityDelete":
+            guard let s = body["id"] as? String, let uid = UUID(uuidString: s),
+                  let i = IdentityStore.shared.identity(uid), !i.isDefault else {
+                reply(webView, id, ["error": "cannot"]); return
+            }
+            (NSApp.delegate as? AppDelegate)?.purgeIdentityEverywhere(uid)
+            IdentityStore.shared.delete(i)
+            reply(webView, id, ["ok": true])
+        case "identityClearData":
+            guard let s = body["id"] as? String, let uid = UUID(uuidString: s),
+                  let i = IdentityStore.shared.identity(uid) else { reply(webView, id, ["error": "notfound"]); return }
+            IdentityStore.shared.wipeData(for: i) { self.reply(webView, id, ["ok": true]) }
+        case "bindingList":
+            let idMap = Dictionary(IdentityStore.shared.all().map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+            let rows = IdentityStore.shared.allBindings().compactMap { b -> [String: Any]? in
+                guard let i = idMap[b.identityID] else { return nil }
+                return ["host": b.host, "identityId": i.id.uuidString,
+                        "identityName": i.name, "color": i.colorHex]
+            }
+            reply(webView, id, rows)
+        case "bindingDelete":
+            if let host = body["host"] as? String { IdentityStore.shared.setBinding(host: host, identityID: nil) }
+            reply(webView, id, ["ok": true])
+        case "openInIdentity":
+            guard let s = body["id"] as? String, let uid = UUID(uuidString: s),
+                  let urlStr = body["url"] as? String, let url = URL(string: urlStr) else {
+                reply(webView, id, ["error": "bad"]); return
+            }
+            (NSApp.delegate as? AppDelegate)?.openTab(url: url, identityID: uid)
+            reply(webView, id, ["ok": true])
+
         // --- Downloads ---
         case "chooseDownloadDir":
             let panel = NSOpenPanel()

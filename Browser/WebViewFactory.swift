@@ -29,18 +29,38 @@ enum WebViewFactory {
         spare = nil
     }
 
-    /// The web view for a new tab: the prewarmed spare when available, else a
-    /// fresh build. Replenishes the spare on the next runloop turn.
-    static func dequeueWebView() -> BrowserWebView {
-        let wv = spare ?? BrowserWebView(frame: .zero, configuration: makeConfiguration())
-        spare = nil
-        if prewarmEnabled { DispatchQueue.main.async { prewarm() } }
-        return wv
+    /// The web view for a new tab. The prewarmed spare is only valid for the
+    /// default identity (its data store is the shared jar); any other identity
+    /// gets a freshly-built view wired to that identity's isolated store.
+    /// Replenishes the default spare on the next runloop turn.
+    static func dequeueWebView(for identity: Identity = IdentityStore.shared.defaultIdentity) -> BrowserWebView {
+        if identity.isDefault {
+            let wv = spare ?? BrowserWebView(frame: .zero, configuration: makeConfiguration(for: identity))
+            spare = nil
+            if prewarmEnabled { DispatchQueue.main.async { prewarm() } }
+            return wv
+        }
+        return BrowserWebView(frame: .zero, configuration: makeConfiguration(for: identity))
     }
 
-    static func makeConfiguration() -> WKWebViewConfiguration {
+    static func makeConfiguration(for identity: Identity = IdentityStore.shared.defaultIdentity) -> WKWebViewConfiguration {
         let conf = WKWebViewConfiguration()
-        conf.setURLSchemeHandler(InternalScheme.shared, forURLScheme: InternalScheme.scheme)
+        // Per-identity cookie/storage isolation: the whole point of containers.
+        // The default identity resolves to the shared `.default()` jar.
+        conf.websiteDataStore = IdentityStore.shared.dataStore(for: identity)
+        applyCommonConfig(to: conf)
+        return conf
+    }
+
+    /// Install our scheme handler, prefs, user scripts, and JS bridges onto a
+    /// configuration. Split out so `createWebViewWith` can decorate the
+    /// WebKit-supplied popup configuration (which carries the opener's data store
+    /// and window handle) instead of substituting a fresh one. Idempotent-safe on
+    /// a fresh controller; guards the scheme handler (setting it twice throws).
+    static func applyCommonConfig(to conf: WKWebViewConfiguration) {
+        if conf.urlSchemeHandler(forURLScheme: InternalScheme.scheme) == nil {
+            conf.setURLSchemeHandler(InternalScheme.shared, forURLScheme: InternalScheme.scheme)
+        }
         conf.preferences.isElementFullscreenEnabled = true
         conf.mediaTypesRequiringUserActionForPlayback = []
         conf.allowsAirPlayForMediaPlayback = true
@@ -66,8 +86,15 @@ enum WebViewFactory {
         GeolocationBridge.shared.install(on: conf)
         SettingsBridge.shared.install(on: conf)
         // Hover-link preview (status bubble): report hovered <a> hrefs.
-        conf.userContentController.addUserScript(StatusBubbleRelay.userScript)
-        conf.userContentController.add(StatusBubbleRelay.shared, name: "linkHover")
-        return conf
+        // remove-before-add so decorating a reused/popup configuration can never
+        // throw "already has a handler for <name>".
+        let ucc = conf.userContentController
+        ucc.addUserScript(StatusBubbleRelay.userScript)
+        ucc.removeScriptMessageHandler(forName: "linkHover")
+        ucc.add(StatusBubbleRelay.shared, name: "linkHover")
+        // Safari-style pull-to-refresh: native gesture + injected indicator/gate.
+        ucc.addUserScript(PullToRefreshRelay.userScript)
+        ucc.removeScriptMessageHandler(forName: PullToRefreshRelay.gateName)
+        ucc.add(PullToRefreshRelay.shared, name: PullToRefreshRelay.gateName)
     }
 }

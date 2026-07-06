@@ -9,6 +9,10 @@ import WebKit
 final class Tab {
     let id = UUID()
     let webView: BrowserWebView
+    /// Which account container this tab belongs to. Its web view's data store was
+    /// built for this identity; the tab strip tints itself with the identity's
+    /// color. Defaults to the built-in default identity.
+    var identityID: UUID = IdentityStore.defaultID
     var title: String = ""
     var url: URL?
     var isLoading: Bool = false
@@ -234,6 +238,10 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
         didSet { updateAudioIcon() }
     }
     private var shapeLayer: CAShapeLayer?
+    /// Colored underline marking a non-default account container. nil = default
+    /// identity, which stays unmarked so the common case has zero extra chrome.
+    var identityColor: NSColor? { didSet { updateIdentityAccent() } }
+    private var accentLayer: CALayer?
     private weak var target: AnyObject?
     private let clickAction: Selector
     private let closeAction: Selector
@@ -241,7 +249,9 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
 
     init(index: Int, title: String, favicon: NSImage?, isSelected: Bool, isLoading: Bool,
          target: AnyObject?, clickAction: Selector, closeAction: Selector,
-         secondaryAction: Selector? = nil, audioAction: Selector? = nil) {
+         secondaryAction: Selector? = nil, audioAction: Selector? = nil,
+         identityColor: NSColor? = nil) {
+        self.identityColor = identityColor
         self.index = index
         self.isSelected = isSelected
         self.isLoading = isLoading
@@ -369,6 +379,27 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
 
         // Update the tab shape path whenever layout changes
         updateShapePath()
+        updateIdentityAccent()
+    }
+
+    /// A thin colored bar hugging the pill's bottom edge (clipped by the tab's
+    /// rounded mask). Only drawn for non-default identities.
+    private func updateIdentityAccent() {
+        guard let identityColor else {
+            accentLayer?.removeFromSuperlayer()
+            accentLayer = nil
+            return
+        }
+        if accentLayer == nil {
+            let l = CALayer()
+            layer?.addSublayer(l)
+            accentLayer = l
+        }
+        let h: CGFloat = 3
+        accentLayer?.frame = NSRect(x: 0, y: 0, width: bounds.width, height: h)
+        // Brighter when selected so the active tab's identity reads clearly.
+        accentLayer?.backgroundColor = identityColor
+            .withAlphaComponent(isSelected ? 1.0 : 0.7).cgColor
     }
 
     private func updateShapePath() {

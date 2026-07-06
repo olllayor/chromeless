@@ -74,15 +74,31 @@ final class DownloadManager: NSObject, WKDownloadDelegate {
         onUpdate?()
     }
 
+    /// Contain a WebKit-suggested filename: drop any path components / traversal,
+    /// neutralize separators and leading dots, and never return empty (which would
+    /// resolve to the downloads directory itself).
+    static func sanitizedFilename(_ raw: String) -> String {
+        var name = (raw as NSString).lastPathComponent
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        while name.hasPrefix(".") { name.removeFirst() }
+        return name.isEmpty ? "download" : name
+    }
+
     func download(_ download: WKDownload, decideDestinationUsing response: URLResponse,
                   suggestedFilename: String, completionHandler: @escaping (URL?) -> Void) {
         let downloads = DownloadManager.destinationDirectory
-        var dest = downloads.appendingPathComponent(suggestedFilename)
+        let safeName = Self.sanitizedFilename(suggestedFilename)
+        var dest = downloads.appendingPathComponent(safeName)
         var counter = 2
         while FileManager.default.fileExists(atPath: dest.path) {
-            let name = (suggestedFilename as NSString).deletingPathExtension
-            let ext = (suggestedFilename as NSString).pathExtension
-            dest = downloads.appendingPathComponent("\(name) \(counter).\(ext)")
+            let ns = safeName as NSString
+            let base = ns.deletingPathExtension
+            let ext = ns.pathExtension
+            // Extensionless files must not gain a trailing dot ("name 2.").
+            let candidate = ext.isEmpty ? "\(base) \(counter)" : "\(base) \(counter).\(ext)"
+            dest = downloads.appendingPathComponent(candidate)
             counter += 1
         }
         var item = DownloadItem(filename: dest.lastPathComponent, destinationURL: dest)

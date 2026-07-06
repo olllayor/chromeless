@@ -51,6 +51,32 @@ final class DB {
         exec("CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history_items BEGIN INSERT INTO history_fts(rowid, url, title) VALUES (new.id, new.url, new.title); END;")
         exec("CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history_items BEGIN INSERT INTO history_fts(history_fts, rowid, url, title) VALUES('delete', old.id, old.url, old.title); END;")
         exec("CREATE TRIGGER IF NOT EXISTS history_au AFTER UPDATE ON history_items BEGIN INSERT INTO history_fts(history_fts, rowid, url, title) VALUES('delete', old.id, old.url, old.title); INSERT INTO history_fts(rowid, url, title) VALUES (new.id, new.url, new.title); END;")
+
+        // Identities — per-tab account containers (see plan/accounts.md). Each
+        // row owns an isolated WKWebsiteDataStore; the default row reuses the
+        // shared jar so existing sessions survive with no migration.
+        exec("""
+        CREATE TABLE IF NOT EXISTS identities (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            color TEXT NOT NULL,
+            emoji TEXT,
+            google_email TEXT,
+            is_default INTEGER DEFAULT 0,
+            ephemeral INTEGER DEFAULT 0,
+            ordering INTEGER DEFAULT 0,
+            created REAL NOT NULL
+        );
+        """)
+        // Host → identity routing rules: a navigation to a bound host is forked
+        // into a tab of that identity (P3). CASCADE so deleting an identity
+        // drops its bindings.
+        exec("""
+        CREATE TABLE IF NOT EXISTS site_bindings (
+            host TEXT PRIMARY KEY,
+            identity_id TEXT NOT NULL REFERENCES identities(id) ON DELETE CASCADE
+        );
+        """)
     }
 
     func exec(_ sql: String) {

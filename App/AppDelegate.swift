@@ -87,6 +87,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         controllers.forEach { $0.setZenMode(enabled: on) }
     }
 
+    /// Identity renamed/recolored on chromeless://accounts: repaint every strip.
+    func refreshAllTabBars() {
+        controllers.forEach { $0.reloadIdentityChrome() }
+    }
+
+    /// Identity deleted: close its tabs across all windows.
+    func purgeIdentityEverywhere(_ id: UUID) {
+        controllers.forEach { $0.purgeIdentity(id) }
+    }
+
+    /// Open a URL in a new tab of a given container (from chromeless://accounts).
+    func openTab(url: URL, identityID: UUID) {
+        let wc = controllers.first(where: { $0.window?.isKeyWindow == true }) ?? controllers.first
+        wc?.newTab(url: url, identityID: identityID)
+        wc?.reloadIdentityChrome()
+    }
+
     /// Enable/disable content blocking across every open tab. Shared by the View
     /// menu toggle and the settings page.
     func setContentBlocking(_ on: Bool) {

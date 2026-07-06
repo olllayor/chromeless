@@ -107,8 +107,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let forwardBtn = NSButton()
     private let reloadBtn = NSButton()
     private let downloadsButton = DownloadsToolbarButton()
-    // Right-edge space reserved in the toolbar for the downloads button, so the
-    // centered location bar never overlaps it on narrow windows.
+    // Helium-style profile avatar at the toolbar's right edge: a round chip
+    // tinted with the current tab's container color. Opens the account switcher.
+    private let identityAvatar = HoverIconButton(frame: .zero)
+    // Right-edge space reserved in the toolbar for the avatar + downloads button,
+    // so the centered location bar never overlaps them on narrow windows.
     private var toolbarRightInset: CGFloat = 0
     private let urlField = NSTextField()
     private var suggestionsView = NSVisualEffectView()
@@ -429,9 +432,20 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
-    func newTab(url: URL? = nil, background: Bool = false) {
-        let wv = WebViewFactory.dequeueWebView()
+    /// The identity a live web view belongs to (its tab's container).
+    func identityID(for webView: WKWebView) -> UUID {
+        tabManager.tabs.first { $0.webView === webView }?.identityID ?? IdentityStore.defaultID
+    }
+
+    /// Open a new tab. `identityID` picks the account container: nil means the
+    /// built-in default (fresh cmd-T / + button); link-open paths pass the opener
+    /// tab's identity so a Work page keeps spawning Work tabs.
+    func newTab(url: URL? = nil, background: Bool = false, identityID: UUID? = nil) {
+        let identity = identityID.flatMap { IdentityStore.shared.identity($0) }
+            ?? IdentityStore.shared.defaultIdentity
+        let wv = WebViewFactory.dequeueWebView(for: identity)
         let tab = Tab(webView: wv)
+        tab.identityID = identity.id
         if UserDefaults.standard.bool(forKey: "NewTabNextToActive") {
             let insertIndex = tabManager.currentIndex + 1
             tabManager.tabs.insert(tab, at: insertIndex)
@@ -705,6 +719,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         webView.onImageCopied = { [weak self] in self?.confirmToast("Image copied", symbol: "photo") }
         webView.onLinkCopied = { [weak self] in self?.confirmToast("Link copied", symbol: "link") }
         updateURLField()
+        updateIdentityAvatar()   // reflect the newly-selected tab's container
         backBtn.isEnabled = webView.canGoBack
         forwardBtn.isEnabled = webView.canGoForward
     }
@@ -898,9 +913,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         tabItemObservations.removeAll()
         tabWidthConstraints.removeAll()
+        // Identity lookup for this rebuild: color a tab only when it's on a
+        // non-default container, so the common case stays unmarked.
+        let identityMap = Dictionary(IdentityStore.shared.all().map { ($0.id, $0) },
+                                     uniquingKeysWith: { a, _ in a })
         var tabItems: [TabBarItem] = []
         for (i, tab) in tabManager.tabs.enumerated() {
             let isSelected = i == tabManager.currentIndex
+            let identity = identityMap[tab.identityID]
             let item = TabBarItem(
                 index: i,
                 title: tab.title,
@@ -911,7 +931,8 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 clickAction: #selector(tabItemClicked(_:)),
                 closeAction: #selector(tabItemCloseClicked(_:)),
                 secondaryAction: #selector(tabItemContextMenu(_:)),
-                audioAction: #selector(tabItemAudioClicked(_:))
+                audioAction: #selector(tabItemAudioClicked(_:)),
+                identityColor: (identity?.isDefault == false) ? identity?.color : nil
             )
             // Preserve current audio/mute state across a tab-bar rebuild.
             item.update(playingAudio: tab.isPlayingAudio, muted: tab.isMuted)
@@ -983,6 +1004,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         tabItemViews = tabItems
         updateTabWidths()
         updateURLField()
+        updateIdentityAvatar()
         backBtn.isEnabled = webView.canGoBack
         forwardBtn.isEnabled = webView.canGoForward
         // Tab count may have crossed the auto-hide threshold (1↔2): re-run the
@@ -1085,6 +1107,192 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         menu.popUp(positioning: nil, at: point, in: item)
     }
 
+    // MARK: Identity chrome (driven by chromeless://accounts)
+
+    /// Repaint the tab strip after an identity was renamed/recolored elsewhere.
+    func reloadIdentityChrome() { refreshTabBar() }
+
+    /// Close every tab on a deleted identity. If that empties the window, drop in
+    /// a fresh default tab so it stays usable.
+    func purgeIdentity(_ id: UUID) {
+        let doomed = tabManager.tabs.filter { $0.identityID == id }
+        guard !doomed.isEmpty else { return }   // this window has no such tabs
+        // Keep the user on their current tab unless it's one of the doomed ones.
+        let keep = tabManager.current.flatMap { $0.identityID == id ? nil : $0 }
+        for tab in doomed {
+            dissolveSplitIfInvolved(tab)
+            tab.webView.removeFromSuperview()
+            tabManager.close(tab)   // keeps currentIndex / mruOrder consistent
+        }
+        if tabManager.tabs.isEmpty {
+            let tab = Tab(webView: WebViewFactory.dequeueWebView())
+            tabManager.replaceAll(with: tab)
+            switchToTab(tab)
+            loadStartPage()
+        } else {
+            switchToTab(keep ?? tabManager.tabs[min(tabManager.currentIndex, tabManager.count - 1)])
+        }
+        refreshTabBar()
+    }
+
+    // MARK: Identity switcher
+
+    /// Boxes a (tab, target identity) pair for the "Move to container" menu item.
+    private final class MoveRequest { let tab: Tab; let identityID: UUID
+        init(_ t: Tab, _ i: UUID) { tab = t; identityID = i } }
+
+    /// Repaint the toolbar avatar to reflect the current tab's container.
+    private func updateIdentityAvatar() {
+        let identity = tabManager.current.flatMap { IdentityStore.shared.identity($0.identityID) }
+            ?? IdentityStore.shared.defaultIdentity
+        identityAvatar.image = avatarImage(for: identity, size: 26)
+        identityAvatar.toolTip = "Account — \(identity.name)"
+    }
+
+    /// A round, color-filled avatar bearing the identity's emoji or initial.
+    private func avatarImage(for identity: Identity, size: CGFloat) -> NSImage {
+        let img = NSImage(size: NSSize(width: size, height: size))
+        img.lockFocus()
+        let inset: CGFloat = 2   // leave room for the button's hover ring
+        let rect = NSRect(x: inset, y: inset, width: size - inset * 2, height: size - inset * 2)
+        identity.color.setFill()
+        NSBezierPath(ovalIn: rect).fill()
+        let label = identity.initial
+        // Emoji glyphs render in their own color and want a larger point size than
+        // a single capital letter.
+        let isEmoji = label.unicodeScalars.contains { $0.properties.isEmoji && $0.value > 0x2000 }
+        let font = NSFont.systemFont(ofSize: rect.height * (isEmoji ? 0.62 : 0.5), weight: .semibold)
+        let str = NSAttributedString(string: label, attributes: [
+            .font: font, .foregroundColor: NSColor.white])
+        let sz = str.size()
+        str.draw(at: NSPoint(x: rect.midX - sz.width / 2, y: rect.midY - sz.height / 2))
+        img.unlockFocus()
+        return img
+    }
+
+    @objc private func identityChipClicked(_ sender: NSButton) {
+        identitySwitcherMenu().popUp(positioning: nil,
+                                     at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    /// Menu to open a new tab in any container, or spin up a new one.
+    private func identitySwitcherMenu() -> NSMenu {
+        let menu = NSMenu()
+        let currentID = tabManager.current?.identityID
+        let header = NSMenuItem(title: "Open new tab in", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for identity in IdentityStore.shared.all() {
+            let item = menu.addItem(withTitle: identity.name,
+                                    action: #selector(newTabInIdentity(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = identity.id.uuidString
+            item.image = identityDotImage(identity.color)
+            if identity.id == currentID { item.state = .on }
+        }
+        // Pin the current site to the current container (auto-routing rule).
+        if let cur = tabManager.current, let host = cur.url?.host,
+           let identity = IdentityStore.shared.identity(cur.identityID) {
+            menu.addItem(.separator())
+            let pinned = IdentityStore.shared.binding(forHost: host) == cur.identityID
+            let title = pinned ? "Stop always opening \(host) here"
+                               : "Always open \(host) in \(identity.name)"
+            let item = menu.addItem(withTitle: title,
+                                    action: #selector(toggleHostBinding(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = host
+        }
+        menu.addItem(.separator())
+        let add = menu.addItem(withTitle: "New Identity…",
+                               action: #selector(promptNewIdentity(_:)), keyEquivalent: "")
+        add.target = self
+        let manage = menu.addItem(withTitle: "Manage Accounts…",
+                                  action: #selector(openAccountsPage(_:)), keyEquivalent: "")
+        manage.target = self
+        return menu
+    }
+
+    @objc private func openAccountsPage(_ sender: Any?) {
+        if let url = URL(string: "\(InternalScheme.scheme)://accounts") { newTab(url: url) }
+        refreshTabBar()
+    }
+
+    @objc private func toggleHostBinding(_ sender: NSMenuItem) {
+        guard let host = sender.representedObject as? String, let cur = tabManager.current else { return }
+        if IdentityStore.shared.binding(forHost: host) == cur.identityID {
+            IdentityStore.shared.setBinding(host: host, identityID: nil)
+            showToast("\(host) no longer pinned")
+        } else {
+            IdentityStore.shared.setBinding(host: host, identityID: cur.identityID)
+            let name = IdentityStore.shared.identity(cur.identityID)?.name ?? "this container"
+            showToast("\(host) always opens in \(name)")
+        }
+    }
+
+    /// Submenu of containers a tab can be moved into (all but its current one).
+    private func moveToIdentityMenu(for tab: Tab) -> NSMenu {
+        let menu = NSMenu()
+        for identity in IdentityStore.shared.all() where identity.id != tab.identityID {
+            let item = menu.addItem(withTitle: identity.name,
+                                    action: #selector(moveTabToIdentity(_:)), keyEquivalent: "")
+            item.target = self
+            item.image = identityDotImage(identity.color)
+            item.representedObject = MoveRequest(tab, identity.id)
+        }
+        return menu
+    }
+
+    private func identityDotImage(_ color: NSColor) -> NSImage {
+        let s: CGFloat = 10
+        let img = NSImage(size: NSSize(width: s, height: s))
+        img.lockFocus()
+        color.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 1, y: 1, width: s - 2, height: s - 2)).fill()
+        img.unlockFocus()
+        return img
+    }
+
+    @objc private func newTabInIdentity(_ sender: NSMenuItem) {
+        guard let s = sender.representedObject as? String, let id = UUID(uuidString: s) else { return }
+        newTab(identityID: id)
+        refreshTabBar()
+    }
+
+    /// Reopen a tab's page in another container. Web views are bound to one data
+    /// store for life, so this creates a fresh tab in the target identity and
+    /// closes the original.
+    @objc private func moveTabToIdentity(_ sender: NSMenuItem) {
+        guard let req = sender.representedObject as? MoveRequest else { return }
+        // newTab creates the replacement in the target container and selects it.
+        newTab(url: req.tab.url, identityID: req.identityID)
+        guard let created = tabManager.current, created.id != req.tab.id else { refreshTabBar(); return }
+        // Close the original through TabManager so currentIndex / mruOrder stay
+        // consistent, then re-select the moved page (close() may shift selection).
+        dissolveSplitIfInvolved(req.tab)
+        req.tab.webView.removeFromSuperview()
+        tabManager.close(req.tab)
+        switchToTab(created)
+        refreshTabBar()
+    }
+
+    @objc private func promptNewIdentity(_ sender: Any?) {
+        let alert = NSAlert()
+        alert.messageText = "New Identity"
+        alert.informativeText = "A separate account container with its own cookies and logins."
+        alert.addButton(withTitle: "Create")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
+        field.placeholderString = "Work, Personal, Client…"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        let identity = IdentityStore.shared.create(name: name)
+        newTab(identityID: identity.id)
+        refreshTabBar()
+    }
+
     private func tabContextMenu(for tab: Tab) -> NSMenu {
         let menu = NSMenu()
         menu.addItem(withTitle: "Duplicate", action: #selector(duplicateTab(_:)), keyEquivalent: "")
@@ -1097,6 +1305,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         } else if tab.id != tabManager.current?.id {
             menu.addItem(withTitle: "Open in Split View", action: #selector(splitWithTab(_:)), keyEquivalent: "")
                 .representedObject = tab
+        }
+        // Move this tab into another account container (only when more than the
+        // default identity exists).
+        if IdentityStore.shared.all().count > 1 {
+            let moveItem = menu.addItem(withTitle: "Move to Container", action: nil, keyEquivalent: "")
+            moveItem.submenu = moveToIdentityMenu(for: tab)
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close Tab", action: #selector(closeTabFromContext(_:)), keyEquivalent: "w")
@@ -1113,7 +1327,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     @objc private func duplicateTab(_ sender: NSMenuItem) {
         guard let tab = sender.representedObject as? Tab else { return }
-        newTab(url: tab.url)
+        newTab(url: tab.url, identityID: tab.identityID)
     }
 
     @objc private func copyTabURL(_ sender: NSMenuItem) {
@@ -1309,6 +1523,19 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         navBtnConfig(downloadsButton, "tray.and.arrow.down", #selector(toggleDownloads(_:)))
         downloadsButton.toolTip = "Downloads"
         downloadsButton.isHidden = true
+
+        // Profile avatar (Helium-style), right edge of the toolbar.
+        identityAvatar.title = ""
+        identityAvatar.isBordered = false
+        identityAvatar.bezelStyle = .regularSquare
+        identityAvatar.imagePosition = .imageOnly
+        identityAvatar.setButtonType(.momentaryChange)
+        identityAvatar.imageScaling = .scaleProportionallyDown
+        identityAvatar.target = self
+        identityAvatar.action = #selector(identityChipClicked(_:))
+        identityAvatar.toolTip = "Accounts"
+        toolbarBar.addSubview(identityAvatar)
+        updateIdentityAvatar()
 
         locationBar.wantsLayer = true
         locationBar.material = .contentBackground
@@ -1680,17 +1907,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             navX += navBtnSize + navBtnGap
         }
 
-        // Downloads button, right edge — only once any download exists.
+        // Right cluster: profile avatar hard against the right edge (Helium),
+        // downloads button just left of it when a download exists.
+        let avatarSize: CGFloat = 26
+        identityAvatar.frame = NSRect(x: b.width - navPad - avatarSize,
+                                      y: (toolbarHeight - avatarSize) / 2,
+                                      width: avatarSize, height: avatarSize)
+        identityAvatar.layer?.cornerRadius = avatarSize / 2
+        var rightInset = avatarSize + 8
+
         let dlVisible = DownloadManager.shared.hasItems
         downloadsButton.isHidden = !dlVisible
         if dlVisible {
-            downloadsButton.frame = NSRect(x: b.width - navPad - navBtnSize,
+            downloadsButton.frame = NSRect(x: b.width - navPad - avatarSize - navBtnGap - navBtnSize,
                                            y: (toolbarHeight - navBtnSize) / 2,
                                            width: navBtnSize, height: navBtnSize)
-            toolbarRightInset = navBtnSize + 8
-        } else {
-            toolbarRightInset = 0
+            rightInset += navBtnSize + navBtnGap
         }
+        toolbarRightInset = rightInset
 
         locationBar.frame = centeredLocationBarFrame(windowWidth: b.width, toolbarY: toolbarY)
 
@@ -2061,6 +2295,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    /// `@work github.com` opens github.com in the Work container; `@work` alone
+    /// opens a fresh Work tab. Matched case-insensitively against identity names
+    /// (full, spaces-stripped, or first word). nil when nothing matches, so a
+    /// stray "@…" just falls through to a normal search.
+    private func parseIdentityBang(_ text: String) -> (identity: Identity, rest: String)? {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard t.hasPrefix("@"), t.count > 1 else { return nil }
+        let parts = t.dropFirst().split(separator: " ", maxSplits: 1)
+        guard let token = parts.first.map({ $0.lowercased() }) else { return nil }
+        let rest = parts.count > 1 ? String(parts[1]) : ""
+        let match = IdentityStore.shared.all().first { i in
+            let n = i.name.lowercased()
+            return n == token
+                || n.replacingOccurrences(of: " ", with: "") == token
+                || n.split(separator: " ").first.map(String.init) == token
+        }
+        return match.map { ($0, rest) }
+    }
+
     private func commitURLField() {
         let text = urlField.stringValue
         dismissSuggestions()
@@ -2068,6 +2321,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         win?.isEditingURLField = false
         win?.forceAllowFocusChange = true   // our own commit — not a page focus-steal
         window?.makeFirstResponder(webView)
+        // @identity bang: open in the named container instead of the current tab.
+        if let (identity, rest) = parseIdentityBang(text) {
+            newTab(url: rest.isEmpty ? nil : smartURL(rest), identityID: identity.id)
+            refreshTabBar()
+            return
+        }
         if let url = smartURL(text) {
             navigate(to: url)
         } else if onStartPage && text.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -2752,10 +3011,23 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-        // Hand non-web schemes (mailto:, facetime:, app links…) to the system.
+        // Deny top-level data:/javascript: documents — they render attacker HTML
+        // under an opaque address bar (phishing surface). Still fine as
+        // subresources/subframes, which don't set isMainFrame.
+        if navigationAction.targetFrame?.isMainFrame == true,
+           let s = navigationAction.request.url?.scheme?.lowercased(),
+           s == "data" || s == "javascript" {
+            decisionHandler(.cancel)
+            return
+        }
+
+        // Hand non-web schemes (mailto:, facetime:, app links…) to the system —
+        // but only for a top-level/new-window navigation, so a hidden sub-frame or
+        // ad iframe can't silently launch someapp:// without a user action.
         if let url = navigationAction.request.url, let scheme = url.scheme?.lowercased(),
            !["http", "https", "file", "about", "data", "blob", "javascript", InternalScheme.scheme].contains(scheme) {
-            NSWorkspace.shared.open(url)
+            let fromMainOrNewWindow = navigationAction.targetFrame?.isMainFrame ?? true
+            if fromMainOrNewWindow { NSWorkspace.shared.open(url) }
             decisionHandler(.cancel)
             return
         }
@@ -2768,6 +3040,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         //  • middle mouse button — buttonNumber 2
         // Programmatic same-frame loads carry none of these, so they fall
         // through to a normal in-tab navigation.
+        // Site auto-routing: a top-level navigation to a host pinned to another
+        // container is re-homed into a tab of that container. This is the thing
+        // Firefox does with a clunky per-visit prompt — here it just happens.
+        // The forked tab already carries the bound identity, so its own load of
+        // the same host sees bound == current and passes through (no loop).
+        if navigationAction.targetFrame?.isMainFrame == true,
+           let url = navigationAction.request.url,
+           let host = url.host,
+           let boundID = IdentityStore.shared.routedIdentity(forHost: host),
+           boundID != identityID(for: webView) {
+            newTab(url: url, identityID: boundID)
+            decisionHandler(.cancel)
+            return
+        }
+
         if let url = navigationAction.request.url {
             let mods = navigationAction.modifierFlags
             let cmdClick = mods.contains(.command)
@@ -2777,7 +3064,11 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
                 // ⌘-click and middle-click open a background tab (Chrome/Safari);
                 // ⌘+Shift or an explicit _blank brings the new tab forward.
                 let background = (cmdClick || middleClick) && !mods.contains(.shift)
-                newTab(url: url, background: background)
+                // Route by binding if the host is pinned, else inherit the
+                // opener tab's identity so links stay in-container.
+                let routedID = url.host.flatMap { IdentityStore.shared.routedIdentity(forHost: $0) }
+                    ?? identityID(for: webView)
+                newTab(url: url, background: background, identityID: routedID)
                 decisionHandler(.cancel)
                 return
             }
@@ -2808,11 +3099,21 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url {
-            newTab(url: url)
-            confirmToast("New tab opened", symbol: "plus.square.on.square")
-        }
-        return nil
+        // Return a real web view built on WebKit's supplied configuration (which
+        // carries the opener's process pool / data store and the window handle) so
+        // window.open()/opener/postMessage and POST target=_blank all keep working
+        // — returning nil (or making our own tab from the URL) drops the handle
+        // and re-issues POSTs as GET. Decorate the config with our handlers first,
+        // wrap the view in a tab that inherits the opener's container.
+        WebViewFactory.applyCommonConfig(to: configuration)
+        let popup = BrowserWebView(frame: .zero, configuration: configuration)
+        let tab = Tab(webView: popup)
+        tab.identityID = identityID(for: webView)
+        tabManager.tabs.append(tab)
+        switchToTab(tab)          // wires delegates + adds to the view hierarchy
+        refreshTabBar()
+        confirmToast("New tab opened", symbol: "plus.square.on.square")
+        return popup              // WebKit drives the navigation into this view
     }
 
     func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,

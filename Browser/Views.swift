@@ -92,6 +92,58 @@ final class BrowserWebView: WKWebView {
         return super.becomeFirstResponder()
     }
 
+    // MARK: Pull-to-refresh (native gesture; see PullToRefresh.swift)
+
+    /// Set by the injected gate script: true only while an overscroll at the very
+    /// top of the page would be a legitimate pull (not inside a scroll container).
+    var pullAllowed = false
+    var pullEnabled = true
+    private var pullAmount: CGFloat = 0
+    static let pullLimit: CGFloat = 150   // px of overscroll to arm a reload
+
+    /// Detect the pull natively so trackpad *momentum* can't fire it: momentum
+    /// events carry no `phase` (only `momentumPhase`), so switching on `phase`
+    /// and ignoring the default case rejects them. Accumulates overscroll only
+    /// while the page reports it's eligible (`pullAllowed`), and drives the
+    /// injected indicator via window.__clPTR.
+    override func scrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)   // never interfere with real scrolling
+        guard pullEnabled else { return }
+        switch event.phase {
+        case .began:
+            pullAmount = 0
+        case .changed:
+            if pullAllowed {
+                // scrollingDeltaY > 0 == content pulled down (overscroll at top).
+                pullAmount = max(0, min(Self.pullLimit, pullAmount + event.scrollingDeltaY))
+                drivePull(pullAmount / Self.pullLimit)
+            } else if pullAmount != 0 {
+                pullAmount = 0
+                evalPTR("hide()")
+            }
+        case .ended, .cancelled:
+            if pullAmount >= Self.pullLimit {
+                evalPTR("fire()")
+                // Let the spinner settle a beat, then reload.
+                let wv = self
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { wv.reload() }
+            } else if pullAmount != 0 {
+                evalPTR("hide()")
+            }
+            pullAmount = 0
+        default:
+            break   // momentum & mouse-wheel (no phase) — ignored
+        }
+    }
+
+    private func drivePull(_ p: CGFloat) {
+        evaluateJavaScript("window.__clPTR&&window.__clPTR.show(\(String(format: "%.3f", p)))",
+                           completionHandler: nil)
+    }
+    private func evalPTR(_ call: String) {
+        evaluateJavaScript("window.__clPTR&&window.__clPTR.\(call)", completionHandler: nil)
+    }
+
     // Detect the native "Copy Image"/"Copy Link" context-menu commands so we can
     // surface a confirmation toast. WebKit performs the copy itself; we wrap the
     // item's action to fire our callback afterwards.

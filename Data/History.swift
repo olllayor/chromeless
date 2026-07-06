@@ -16,7 +16,11 @@ final class HistoryStore {
         let now = Date().timeIntervalSince1970
         let stmt = db.prepare(
             "INSERT INTO history_items (url, title, host, visit_count, last_visit) VALUES (?, ?, ?, 1, ?) " +
-            "ON CONFLICT(url) DO UPDATE SET title=excluded.title, visit_count=visit_count+1, last_visit=excluded.last_visit;"
+            // Keep the existing title if this revisit finished before its title was
+            // set (empty) — otherwise a good title gets wiped to ''.
+            "ON CONFLICT(url) DO UPDATE SET " +
+            "title=CASE WHEN excluded.title<>'' THEN excluded.title ELSE history_items.title END, " +
+            "visit_count=visit_count+1, last_visit=excluded.last_visit;"
         )
         if let stmt {
             sqlite3_bind_text(stmt, 1, absolute, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))

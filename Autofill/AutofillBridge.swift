@@ -31,7 +31,7 @@ final class Autofill: NSObject, WKScriptMessageHandler {
               let webView = message.webView else { return }
         let origin = message.frameInfo.securityOrigin
         let scheme = origin.`protocol`
-        guard !origin.host.isEmpty, scheme == "https" || scheme == "http" else { return }
+        guard !origin.host.isEmpty, Self.isSecureContext(scheme: scheme, host: origin.host) else { return }
         let host = origin.host
         guard let controller = webView.window?.windowController as? BrowserWindowController else { return }
 
@@ -49,6 +49,19 @@ final class Autofill: NSObject, WKScriptMessageHandler {
         default:
             break
         }
+    }
+
+    /// Only save/fill in a secure context: https anywhere, or http on
+    /// loopback/.local (dev/intranet). Blocks an http MITM/sslstrip page from
+    /// harvesting a password saved for the https origin — the vault is keyed by
+    /// host only, so without this an https credential would fill on http.
+    private static func isSecureContext(scheme: String, host: String) -> Bool {
+        if scheme == "https" { return true }
+        if scheme == "http" {
+            let h = host.lowercased()
+            return h == "localhost" || h == "127.0.0.1" || h == "::1" || h.hasSuffix(".local")
+        }
+        return false
     }
 
     /// Touch ID gate, then inject the credential into the requesting frame.
