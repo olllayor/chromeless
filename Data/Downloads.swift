@@ -274,15 +274,16 @@ final class PillButton: NSButton {
     }
 
     private func refresh() {
+        // Eased hover (animateBackground) — matches the chrome-wide hover feel.
         switch kind {
         case .primary:
-            layer?.backgroundColor = NSColor.controlAccentColor
-                .withAlphaComponent(hovering ? 1.0 : 0.9).cgColor
+            layer?.animateBackground(to: ChromeTheme.accent
+                .withAlphaComponent(hovering ? 1.0 : 0.9).cgColor)
         case .secondary:
-            layer?.backgroundColor = NSColor.white
-                .withAlphaComponent(hovering ? 0.16 : 0.09).cgColor
+            layer?.animateBackground(to: NSColor.white
+                .withAlphaComponent(hovering ? 0.16 : 0.09).cgColor)
         case .icon:
-            layer?.backgroundColor = (hovering ? NSColor.white.withAlphaComponent(0.12) : .clear).cgColor
+            layer?.animateBackground(to: (hovering ? NSColor.white.withAlphaComponent(0.12) : .clear).cgColor)
             contentTintColor = hovering ? .secondaryLabelColor : .tertiaryLabelColor
         }
     }

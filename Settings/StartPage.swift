@@ -42,7 +42,10 @@ let startPageHTML = """
     <div class="k"><kbd>esc</kbd></div>             <div>bail out &mdash; back to this page</div>
     <div class="k"><kbd>&#8984; =</kbd> <kbd>&#8984; &minus;</kbd> <kbd>&#8984; 0</kbd></div><div>zoom</div>
     <div class="k"><kbd>&#8679;&#8984; C</kbd></div><div>copy current url</div>
+    <div class="k"><kbd>&#8679;&#8984; E</kbd></div><div>split view &mdash; two tabs side by side</div>
+    <div class="k"><kbd>&#8679;&#8984; L</kbd></div><div>frameless mode &mdash; chrome hides until hover</div>
+    <div class="k"><kbd>&#8984; Y</kbd></div>       <div>history</div>
   </div>
-  <footer>&#8984;N new window &nbsp;&middot;&nbsp; &#8984;R reload &nbsp;&middot;&nbsp; &#8679;&#8984;W close window</footer>
+  <footer>&#8984;N new window &nbsp;&middot;&nbsp; &#8984;R reload &nbsp;&middot;&nbsp; &#8984;, settings &nbsp;&middot;&nbsp; &#8679;&#8984;W close window</footer>
 </main></body></html>
 """
