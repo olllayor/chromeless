@@ -169,6 +169,62 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
             }
             reply(webView, id, ["path": DownloadManager.destinationDirectory.path])
 
+        // --- Keyboard shortcuts ---
+        case "listShortcuts":
+            let kb = Keybindings.shared
+            let rows = kb.commands.map { c -> [String: Any] in
+                ["id": c.id, "title": c.title, "group": c.group,
+                 "keys": kb.displayString(kb.current(c.id)),
+                 "custom": kb.isCustomized(c.id)]
+            }
+            reply(webView, id, rows)
+        case "setShortcut":
+            guard let cid = body["cmd"] as? String,
+                  let char = body["char"] as? String, !char.isEmpty else {
+                reply(webView, id, ["error": "bad"]); return
+            }
+            var mods: NSEvent.ModifierFlags = []
+            if body["meta"] as? Bool == true { mods.insert(.command) }
+            if body["ctrl"] as? Bool == true { mods.insert(.control) }
+            if body["alt"] as? Bool == true { mods.insert(.option) }
+            if body["shift"] as? Bool == true { mods.insert(.shift) }
+            // Require a non-Shift modifier so a binding can't swallow plain typing.
+            guard mods.contains(.command) || mods.contains(.control) || mods.contains(.option) else {
+                reply(webView, id, ["error": "needmod"]); return
+            }
+            let sc = Shortcut(key: char, mods: mods)
+            if let reserved = Keybindings.shared.reservedReason(sc) {
+                reply(webView, id, ["error": "reserved", "with": reserved]); return
+            }
+            if let other = Keybindings.shared.conflict(for: cid, sc) {
+                let title = Keybindings.shared.commands.first { $0.id == other }?.title ?? other
+                reply(webView, id, ["error": "conflict", "with": title]); return
+            }
+            Keybindings.shared.set(cid, sc)
+            (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            reply(webView, id, ["ok": true,
+                                "keys": Keybindings.shared.displayString(sc),
+                                "custom": Keybindings.shared.isCustomized(cid)])
+        case "resetShortcut":
+            if let cid = body["cmd"] as? String {
+                Keybindings.shared.reset(cid)
+                (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+                reply(webView, id, ["keys": Keybindings.shared.displayString(Keybindings.shared.current(cid)),
+                                    "custom": false])
+            }
+        case "resetAllShortcuts":
+            Keybindings.shared.resetAll()
+            (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            reply(webView, id, ["ok": true])
+        case "beginShortcutCapture":
+            Keybindings.shared.suspended = true
+            (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            reply(webView, id, ["ok": true])
+        case "endShortcutCapture":
+            Keybindings.shared.suspended = false
+            (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            reply(webView, id, ["ok": true])
+
         default:
             break
         }

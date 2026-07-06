@@ -96,6 +96,23 @@ let settingsHTML = """
   .sech { display:flex; align-items:center; justify-content:space-between;
           margin:26px 2px 10px; font-size:11px; font-weight:600; letter-spacing:.04em;
           text-transform:uppercase; color:var(--dim); }
+  /* Shortcut recorder rows */
+  .scrow { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:13px 18px; }
+  .scrow + .scrow { border-top:1px solid var(--line); }
+  .scrow .t { font-size:13.5px; font-weight:500; }
+  .scrow .right { display:flex; align-items:center; gap:8px; }
+  .kbtn { min-width:84px; text-align:center; font:600 12.5px ui-monospace,"SF Mono",monospace;
+          background:var(--card2); color:var(--text); border:1px solid var(--line);
+          border-bottom-width:2px; border-radius:8px; padding:5px 11px; cursor:pointer;
+          transition:border-color .15s ease, color .15s ease, background .15s ease; }
+  .kbtn:hover { border-color:var(--accent); }
+  .kbtn.rec { border-color:var(--accent); color:var(--accent);
+              background:color-mix(in srgb, var(--accent) 14%, transparent); }
+  .kbtn.err { border-color:#ff6b64; color:#ff6b64; }
+  .kbtn.custom { color:var(--accent); }
+  .scrow .reset { visibility:hidden; }
+  .scrow.customized .reset { visibility:visible; }
+  .caphint { color:var(--dim); font-size:12px; margin:-4px 2px 16px; min-height:15px; }
 </style></head>
 <body>
 <nav>
@@ -106,6 +123,8 @@ let settingsHTML = """
     <svg viewBox="0 0 24 24"><path d="M12 2C6.49 2 2 6.49 2 12s4.49 10 10 10c1.38 0 2.5-1.12 2.5-2.5 0-.61-.23-1.2-.64-1.67-.08-.1-.13-.21-.13-.33 0-.28.22-.5.5-.5H16c3.31 0 6-2.69 6-6 0-4.96-4.49-9-10-9zm5.5 11c-.83 0-1.5-.67-1.5-1.5S16.67 10 17.5 10s1.5.67 1.5 1.5-.67 1.5-1.5 1.5zm-3-4C13.67 9 13 8.33 13 7.5S13.67 6 14.5 6s1.5.67 1.5 1.5S15.33 9 14.5 9zM5 11.5C5 10.67 5.67 10 6.5 10S8 10.67 8 11.5 7.33 13 6.5 13 5 12.33 5 11.5zm4-4C9 6.67 9.67 6 10.5 6S12 6.67 12 7.5 11.33 9 10.5 9 9 8.33 9 7.5z"/></svg>Appearance</a>
   <a data-s="accessibility">
     <svg viewBox="0 0 24 24"><path d="M12 2c1.1 0 2 .9 2 2s-.9 2-2 2-2-.9-2-2 .9-2 2-2zm9 7h-6v13h-2v-6h-2v6H9V9H3V7h18v2z"/></svg>Accessibility</a>
+  <a data-s="shortcuts">
+    <svg viewBox="0 0 24 24"><path d="M20 5H4c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 12H4V7h16v10zM7 8h2v2H7V8zm0 3h2v2H7v-2zm3-3h2v2h-2V8zm0 3h2v2h-2v-2zm3 0h2v2h-2v-2zm0-3h2v2h-2V8zm3 0h2v2h-2V8zm0 3h2v2h-2v-2zM8 14h8v2H8v-2z"/></svg>Shortcuts</a>
   <a data-s="privacy">
     <svg viewBox="0 0 24 24"><path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/></svg>Privacy &amp; Security</a>
   <a data-s="passwords">
@@ -221,6 +240,14 @@ let settingsHTML = """
         <label class="sw"><input type="checkbox" id="confirmationToasts"><span></span></label>
       </div>
     </div>
+  </section>
+
+  <section id="shortcuts">
+    <h2>Keyboard shortcuts</h2>
+    <p class="sub">Click any shortcut, then press the new key combination. Every combo needs ⌘, ⌃, or ⌥.</p>
+    <div class="caphint" id="capHint"></div>
+    <div id="scList"></div>
+    <div style="margin-top:8px"><button class="link danger" id="resetAllSc">Reset all to defaults</button></div>
   </section>
 
   <section id="privacy">
@@ -444,6 +471,95 @@ let settingsHTML = """
     });
   };
 
+  // --- Keyboard shortcuts ---
+  function scBaseChar(e) {
+    var c = e.code;
+    if (/^Key[A-Z]$/.test(c)) return c.slice(3).toLowerCase();
+    if (/^Digit[0-9]$/.test(c)) return c.slice(5);
+    var m = { Minus:'-', Equal:'=', BracketLeft:'[', BracketRight:']', Semicolon:';',
+              Quote:"'", Comma:',', Period:'.', Slash:'/', Space:' ' };
+    return c in m ? m[c] : null;
+  }
+  function scGroup(rows) {
+    var order = [], byName = {};
+    rows.forEach(function (r) {
+      if (!byName[r.group]) { byName[r.group] = []; order.push(r.group); }
+      byName[r.group].push(r);
+    });
+    return order.map(function (n) { return { name:n, items:byName[n] }; });
+  }
+  function setHint(t) { document.getElementById('capHint').textContent = t || ''; }
+
+  function renderShortcuts() {
+    request('listShortcuts').then(function (rows) {
+      var host = document.getElementById('scList');
+      host.innerHTML = scGroup(rows).map(function (g) {
+        return '<div class="sech"><span>'+esc(g.name)+'</span></div><div class="card">'+
+          g.items.map(function (r) {
+            return '<div class="scrow'+(r.custom?' customized':'')+'">'+
+              '<div class="t">'+esc(r.title)+'</div><div class="right">'+
+              '<button class="link reset" data-reset="'+esc(r.id)+'">Reset</button>'+
+              '<button class="kbtn'+(r.custom?' custom':'')+'" data-rec="'+esc(r.id)+'">'+esc(r.keys)+'</button>'+
+              '</div></div>';
+          }).join('')+'</div>';
+      }).join('');
+      host.querySelectorAll('[data-rec]').forEach(function (b) { b.onclick = function () { startRecord(b); }; });
+      host.querySelectorAll('[data-reset]').forEach(function (b) {
+        b.onclick = function () { request('resetShortcut', {cmd:b.dataset.reset}).then(function(){ renderShortcuts(); }); };
+      });
+    });
+  }
+
+  var recBtn = null, capActive = false;
+  function endCapture() {
+    document.removeEventListener('keydown', onCapKey, true);
+    window.removeEventListener('blur', onBlur, true);
+    if (capActive) { capActive = false; request('endShortcutCapture'); }
+  }
+  function onBlur() { cancelRecord(); }
+  function cancelRecord() {
+    if (recBtn) { recBtn.classList.remove('rec'); recBtn.textContent = recBtn.dataset.prev; recBtn = null; }
+    setHint(''); endCapture();
+  }
+  function startRecord(b) {
+    if (recBtn === b) { cancelRecord(); return; }
+    cancelRecord();
+    recBtn = b; b.dataset.prev = b.textContent;
+    b.classList.remove('custom', 'err'); b.classList.add('rec'); b.textContent = 'Press keys…';
+    setHint('Recording — press a combo, or Esc to cancel.');
+    capActive = true;
+    request('beginShortcutCapture').then(function () {
+      document.addEventListener('keydown', onCapKey, true);
+      window.addEventListener('blur', onBlur, true);
+    });
+  }
+  function onCapKey(e) {
+    e.preventDefault(); e.stopPropagation();
+    var k = e.key;
+    if (k === 'Meta' || k === 'Control' || k === 'Alt' || k === 'Shift' || k === 'CapsLock') return;
+    if (k === 'Escape') { cancelRecord(); return; }
+    var ch = scBaseChar(e);
+    if (!ch) { setHint('Unsupported key — try a letter, number, or symbol.'); return; }
+    if (!(e.metaKey || e.ctrlKey || e.altKey)) { setHint('Add ⌘, ⌃, or ⌥ to the key.'); return; }
+    var b = recBtn;
+    document.removeEventListener('keydown', onCapKey, true);
+    window.removeEventListener('blur', onBlur, true);
+    request('setShortcut', {cmd:b.dataset.rec, char:ch,
+      meta:e.metaKey, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey}).then(function (res) {
+      capActive = false; request('endShortcutCapture'); recBtn = null;
+      if (res && res.error) {
+        if (res.error === 'conflict') setHint('That combo is already used by “' + res.with + '”.');
+        else if (res.error === 'reserved') setHint('“' + res.with + '” reserves that combo — pick another.');
+        else setHint('Add ⌘, ⌃, or ⌥ to the key.');
+        b.classList.remove('rec'); b.classList.add('err'); b.textContent = b.dataset.prev;
+        setTimeout(function () { b.classList.remove('err'); }, 1400);
+      } else { setHint(''); renderShortcuts(); }
+    });
+  }
+  document.getElementById('resetAllSc').onclick = function () {
+    request('resetAllShortcuts').then(function () { renderShortcuts(); });
+  };
+
   // Lazy-load list data when its pane is first shown.
   var loaded = {};
   var origActivate = activate;
@@ -451,6 +567,7 @@ let settingsHTML = """
     origActivate(name);
     if (name === 'privacy' && !loaded.privacy) { loaded.privacy = true; renderPerms(); }
     if (name === 'passwords' && !loaded.passwords) { loaded.passwords = true; renderPasswords(); }
+    if (name === 'shortcuts' && !loaded.shortcuts) { loaded.shortcuts = true; renderShortcuts(); }
   };
   if (location.hash) activate(location.hash.slice(1));
 
