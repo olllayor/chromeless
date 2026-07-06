@@ -110,9 +110,21 @@ let settingsHTML = """
               background:color-mix(in srgb, var(--accent) 14%, transparent); }
   .kbtn.err { border-color:#ff6b64; color:#ff6b64; }
   .kbtn.custom { color:var(--accent); }
+  .kbtn.warn { border-color:#e0a23c; }
   .scrow .reset { visibility:hidden; }
   .scrow.customized .reset { visibility:visible; }
   .caphint { color:var(--dim); font-size:12px; margin:-4px 2px 16px; min-height:15px; }
+  .caphint.warn { color:#e0a23c; }
+  .filter { width:100%; background:var(--card2); color:var(--text); border:1px solid var(--line);
+            border-radius:9px; padding:9px 13px; font:13px -apple-system; margin:0 0 16px;
+            transition:border-color .15s ease; -webkit-appearance:none; }
+  .filter:focus { outline:none; border-color:var(--accent); }
+  .filter::placeholder { color:var(--dim); }
+  .sech .greset { font:600 11px -apple-system; letter-spacing:0; text-transform:none;
+                  visibility:hidden; }
+  .scgroup.has-custom .sech .greset { visibility:visible; }
+  .kbtn.sys { cursor:default; color:var(--dim2); border-bottom-width:1px; }
+  .kbtn.sys:hover { border-color:var(--line); }
 </style></head>
 <body>
 <nav>
@@ -245,9 +257,13 @@ let settingsHTML = """
   <section id="shortcuts">
     <h2>Keyboard shortcuts</h2>
     <p class="sub">Click any shortcut, then press the new key combination. Every combo needs ⌘, ⌃, or ⌥.</p>
+    <input type="search" id="scFilter" class="filter" placeholder="Filter shortcuts…" autocomplete="off" spellcheck="false">
     <div class="caphint" id="capHint"></div>
     <div id="scList"></div>
-    <div style="margin-top:8px"><button class="link danger" id="resetAllSc">Reset all to defaults</button></div>
+    <div class="sech" style="margin-top:26px"><span>System</span></div>
+    <p class="sub" style="margin:-2px 2px 10px">Built-in keys — not customizable.</p>
+    <div class="card list" id="scSystem"></div>
+    <div style="margin-top:18px"><button class="link danger" id="resetAllSc">Reset all to defaults</button></div>
   </section>
 
   <section id="privacy">
@@ -472,13 +488,20 @@ let settingsHTML = """
   };
 
   // --- Keyboard shortcuts ---
+  // Base character of a keypress, matched the way the native menu matches
+  // (charactersIgnoringModifiers). Without Shift, e.key IS that layout char, so
+  // this works on AZERTY/Dvorak etc. With Shift held e.key is the shifted glyph,
+  // so fall back to the physical code to recover digits/letters.
+  var CODE_CHAR = { Minus:'-', Equal:'=', BracketLeft:'[', BracketRight:']', Semicolon:';',
+                    Quote:"'", Comma:',', Period:'.', Slash:'/', Space:' ' };
   function scBaseChar(e) {
+    if (!e.shiftKey && e.key && e.key.length === 1) return e.key.toLowerCase();
     var c = e.code;
     if (/^Key[A-Z]$/.test(c)) return c.slice(3).toLowerCase();
     if (/^Digit[0-9]$/.test(c)) return c.slice(5);
-    var m = { Minus:'-', Equal:'=', BracketLeft:'[', BracketRight:']', Semicolon:';',
-              Quote:"'", Comma:',', Period:'.', Slash:'/', Space:' ' };
-    return c in m ? m[c] : null;
+    if (c in CODE_CHAR) return CODE_CHAR[c];
+    if (e.key && e.key.length === 1) return e.key.toLowerCase();
+    return null;
   }
   function scGroup(rows) {
     var order = [], byName = {};
@@ -488,35 +511,58 @@ let settingsHTML = """
     });
     return order.map(function (n) { return { name:n, items:byName[n] }; });
   }
-  function setHint(t) { document.getElementById('capHint').textContent = t || ''; }
+  function setHint(t, warn) {
+    var el = document.getElementById('capHint');
+    el.textContent = t || ''; el.classList.toggle('warn', !!warn);
+  }
 
   function renderShortcuts() {
-    request('listShortcuts').then(function (rows) {
+    request('listShortcuts').then(function (data) {
+      var rows = (data && data.commands) || [], system = (data && data.system) || [];
       var host = document.getElementById('scList');
       host.innerHTML = scGroup(rows).map(function (g) {
-        return '<div class="sech"><span>'+esc(g.name)+'</span></div><div class="card">'+
+        var anyCustom = g.items.some(function (r) { return r.custom; });
+        var ids = g.items.map(function (r) { return r.id; }).join(' ');
+        return '<div class="scgroup'+(anyCustom?' has-custom':'')+'">'+
+          '<div class="sech"><span>'+esc(g.name)+'</span>'+
+          '<button class="link greset" data-greset="'+esc(ids)+'">Reset group</button></div>'+
+          '<div class="card">'+
           g.items.map(function (r) {
-            return '<div class="scrow'+(r.custom?' customized':'')+'">'+
+            return '<div class="scrow'+(r.custom?' customized':'')+'" data-title="'+esc(r.title.toLowerCase())+'">'+
               '<div class="t">'+esc(r.title)+'</div><div class="right">'+
               '<button class="link reset" data-reset="'+esc(r.id)+'">Reset</button>'+
-              '<button class="kbtn'+(r.custom?' custom':'')+'" data-rec="'+esc(r.id)+'">'+esc(r.keys)+'</button>'+
+              '<button class="kbtn'+(r.custom?' custom':'')+'" data-rec="'+esc(r.id)+'" '+
+                'aria-label="'+esc(r.title)+' shortcut, currently '+esc(r.keys)+'. Activate to change.">'+esc(r.keys)+'</button>'+
               '</div></div>';
-          }).join('')+'</div>';
+          }).join('')+'</div></div>';
       }).join('');
       host.querySelectorAll('[data-rec]').forEach(function (b) { b.onclick = function () { startRecord(b); }; });
       host.querySelectorAll('[data-reset]').forEach(function (b) {
-        b.onclick = function () { request('resetShortcut', {cmd:b.dataset.reset}).then(function(){ renderShortcuts(); }); };
+        b.onclick = function () { request('resetShortcut', {cmd:b.dataset.reset}).then(renderShortcuts); };
       });
+      host.querySelectorAll('[data-greset]').forEach(function (b) {
+        b.onclick = function () {
+          var ids = b.dataset.greset.split(' ');
+          Promise.all(ids.map(function (cid) { return request('resetShortcut', {cmd:cid}); })).then(renderShortcuts);
+        };
+      });
+      document.getElementById('scSystem').innerHTML = system.length ? system.map(function (s) {
+        return '<div class="scrow" data-title="'+esc(s.title.toLowerCase())+'"><div class="t">'+esc(s.title)+
+          '</div><div class="right"><span class="kbtn sys">'+esc(s.keys)+'</span></div></div>';
+      }).join('') : '';
+      applyFilter();
     });
   }
 
   var recBtn = null, capActive = false;
   function endCapture() {
     document.removeEventListener('keydown', onCapKey, true);
+    document.removeEventListener('mousedown', onOutside, true);
     window.removeEventListener('blur', onBlur, true);
     if (capActive) { capActive = false; request('endShortcutCapture'); }
   }
   function onBlur() { cancelRecord(); }
+  function onOutside(e) { if (recBtn && e.target !== recBtn) cancelRecord(); }
   function cancelRecord() {
     if (recBtn) { recBtn.classList.remove('rec'); recBtn.textContent = recBtn.dataset.prev; recBtn = null; }
     setHint(''); endCapture();
@@ -530,6 +576,7 @@ let settingsHTML = """
     capActive = true;
     request('beginShortcutCapture').then(function () {
       document.addEventListener('keydown', onCapKey, true);
+      document.addEventListener('mousedown', onOutside, true);
       window.addEventListener('blur', onBlur, true);
     });
   }
@@ -543,6 +590,7 @@ let settingsHTML = """
     if (!(e.metaKey || e.ctrlKey || e.altKey)) { setHint('Add ⌘, ⌃, or ⌥ to the key.'); return; }
     var b = recBtn;
     document.removeEventListener('keydown', onCapKey, true);
+    document.removeEventListener('mousedown', onOutside, true);
     window.removeEventListener('blur', onBlur, true);
     request('setShortcut', {cmd:b.dataset.rec, char:ch,
       meta:e.metaKey, ctrl:e.ctrlKey, alt:e.altKey, shift:e.shiftKey}).then(function (res) {
@@ -553,17 +601,52 @@ let settingsHTML = """
         else setHint('Add ⌘, ⌃, or ⌥ to the key.');
         b.classList.remove('rec'); b.classList.add('err'); b.textContent = b.dataset.prev;
         setTimeout(function () { b.classList.remove('err'); }, 1400);
-      } else { setHint(''); renderShortcuts(); }
+      } else {
+        if (res && res.warn) setHint('Set — but macOS usually uses this for ' + res.warn + '.', true);
+        else setHint('');
+        renderShortcuts();
+      }
     });
   }
-  document.getElementById('resetAllSc').onclick = function () {
-    request('resetAllShortcuts').then(function () { renderShortcuts(); });
+
+  // Reset-all: two-click confirm so one stray click can't wipe every custom key.
+  var resetAllArmed = false, resetAllTimer = null;
+  var resetAllBtn = document.getElementById('resetAllSc');
+  resetAllBtn.onclick = function () {
+    if (!resetAllArmed) {
+      resetAllArmed = true; resetAllBtn.textContent = 'Click again to reset all';
+      resetAllTimer = setTimeout(function () {
+        resetAllArmed = false; resetAllBtn.textContent = 'Reset all to defaults';
+      }, 2500);
+      return;
+    }
+    clearTimeout(resetAllTimer); resetAllArmed = false;
+    resetAllBtn.textContent = 'Reset all to defaults';
+    request('resetAllShortcuts').then(renderShortcuts);
   };
+
+  // Filter rows (and their groups) by title.
+  function applyFilter() {
+    var q = (document.getElementById('scFilter').value || '').trim().toLowerCase();
+    document.querySelectorAll('#scList .scgroup').forEach(function (g) {
+      var shown = 0;
+      g.querySelectorAll('.scrow').forEach(function (r) {
+        var hit = !q || r.dataset.title.indexOf(q) !== -1;
+        r.style.display = hit ? '' : 'none'; if (hit) shown++;
+      });
+      g.style.display = shown ? '' : 'none';
+    });
+    document.querySelectorAll('#scSystem .scrow').forEach(function (r) {
+      r.style.display = (!q || r.dataset.title.indexOf(q) !== -1) ? '' : 'none';
+    });
+  }
+  document.getElementById('scFilter').oninput = applyFilter;
 
   // Lazy-load list data when its pane is first shown.
   var loaded = {};
   var origActivate = activate;
   activate = function (name) {
+    if (name !== 'shortcuts') cancelRecord(); // never leave a capture armed off-pane
     origActivate(name);
     if (name === 'privacy' && !loaded.privacy) { loaded.privacy = true; renderPerms(); }
     if (name === 'passwords' && !loaded.passwords) { loaded.passwords = true; renderPasswords(); }

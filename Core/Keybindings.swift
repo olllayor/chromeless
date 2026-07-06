@@ -124,6 +124,33 @@ final class Keybindings {
     /// If `shortcut` is owned by a fixed built-in, the built-in's name; else nil.
     func reservedReason(_ shortcut: Shortcut) -> String? { Self.reserved[shortcut.canonical] }
 
+    /// Combos macOS itself usually claims. We don't block these — the user may
+    /// have disabled the system shortcut — but we warn, since otherwise the key
+    /// silently never reaches the app and the binding looks broken.
+    private static let osClaimed: [String: String] = {
+        func c(_ key: String, _ mods: NSEvent.ModifierFlags) -> String { Shortcut(key: key, mods: mods).canonical }
+        let cmd: NSEvent.ModifierFlags = [.command]
+        let cmdShift: NSEvent.ModifierFlags = [.command, .shift]
+        return [
+            c(" ", cmd): "Spotlight",
+            c(" ", [.control, .command]): "Emoji picker",
+            c("3", cmdShift): "macOS screenshot",
+            c("4", cmdShift): "macOS screenshot",
+            c("5", cmdShift): "macOS screenshot",
+        ]
+    }()
+
+    /// Name of the macOS feature that usually claims this combo, if any.
+    func osWarning(_ shortcut: Shortcut) -> String? { Self.osClaimed[shortcut.canonical] }
+
+    /// Fixed, non-configurable shortcuts, surfaced read-only in Settings so the
+    /// page is a complete reference. Handlers live in TabbedWebView / omnibox.
+    let systemShortcuts: [(title: String, keys: String)] = [
+        ("Switch to tab 1–9", "⌘1 … ⌘9"),
+        ("Cycle through tabs", "⌃⇥"),
+        ("Bail out / close overlay", "esc"),
+    ]
+
     /// Returns the id of a different command already bound to `shortcut`, if any.
     func conflict(for id: String, _ shortcut: Shortcut) -> String? {
         let target = shortcut.canonical
@@ -203,14 +230,38 @@ final class Keybindings {
 
     // MARK: Persistence
 
+    /// Modifier ⇄ token, so stored values read like "cmd+shift+k" instead of an
+    /// opaque bitmask — debuggable and stable across builds.
+    private static let modToken: [(NSEvent.ModifierFlags, String)] =
+        [(.command, "cmd"), (.control, "ctrl"), (.option, "alt"), (.shift, "shift")]
+
+    static func encode(_ sc: Shortcut) -> String {
+        var parts = modToken.compactMap { sc.mods.contains($0.0) ? $0.1 : nil }
+        parts.append(sc.key)
+        return parts.joined(separator: "+")
+    }
+
+    static func decode(_ s: String) -> Shortcut? {
+        // Split on "+" but keep a trailing literal "+" key intact (there is none
+        // in our key set, but be defensive): the last field is always the key.
+        // Reject the pre-token bitmask format ("1179648|t") outright rather than
+        // load its "1179648|t" as a bogus key; those overrides just fall back to
+        // the default.
+        guard !s.contains("|") else { return nil }
+        let fields = s.components(separatedBy: "+")
+        guard let key = fields.last, !key.isEmpty else { return nil }
+        var mods: NSEvent.ModifierFlags = []
+        for token in fields.dropLast() {
+            guard let m = modToken.first(where: { $0.1 == token })?.0 else { return nil }
+            mods.insert(m)
+        }
+        return Shortcut(key: key, mods: mods)
+    }
+
     private func load() {
         guard let raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] else { return }
         for (id, s) in raw {
-            let parts = s.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
-            guard parts.count == 2, let bits = UInt(parts[0]) else { continue }
-            let key = String(parts[1])
-            guard !key.isEmpty, byId[id] != nil else { continue }
-            let sc = Shortcut(key: key, mods: NSEvent.ModifierFlags(rawValue: bits).intersection(Self.relevantMods))
+            guard byId[id] != nil, let sc = Self.decode(s), !sc.key.isEmpty else { continue }
             // Ignore anything that would shadow a fixed built-in (belt-and-suspenders
             // against hand-edited defaults or combos reserved by a newer build).
             if reservedReason(sc) != nil { continue }
@@ -220,9 +271,7 @@ final class Keybindings {
 
     private func save() {
         var raw: [String: String] = [:]
-        for (id, sc) in overrides {
-            raw[id] = "\(sc.mods.intersection(Self.relevantMods).rawValue)|\(sc.key)"
-        }
+        for (id, sc) in overrides { raw[id] = Self.encode(sc) }
         UserDefaults.standard.set(raw, forKey: defaultsKey)
     }
 }

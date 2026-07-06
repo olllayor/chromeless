@@ -13,6 +13,10 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
     static let shared = SettingsBridge()
     static let messageName = "clSettingsBridge"
 
+    /// Bumped on every begin/end capture so a stale dead-man's-switch timer knows
+    /// it's been superseded and skips restoring the menu.
+    private var captureGen = 0
+
     func install(on config: WKWebViewConfiguration) {
         config.userContentController.add(self, name: Self.messageName)
     }
@@ -177,7 +181,8 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
                  "keys": kb.displayString(kb.current(c.id)),
                  "custom": kb.isCustomized(c.id)]
             }
-            reply(webView, id, rows)
+            let system = kb.systemShortcuts.map { ["title": $0.title, "keys": $0.keys] }
+            reply(webView, id, ["commands": rows, "system": system])
         case "setShortcut":
             guard let cid = body["cmd"] as? String,
                   let char = body["char"] as? String, !char.isEmpty else {
@@ -202,9 +207,11 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
             }
             Keybindings.shared.set(cid, sc)
             (NSApp.delegate as? AppDelegate)?.rebuildMenu()
-            reply(webView, id, ["ok": true,
-                                "keys": Keybindings.shared.displayString(sc),
-                                "custom": Keybindings.shared.isCustomized(cid)])
+            var out: [String: Any] = ["ok": true,
+                                      "keys": Keybindings.shared.displayString(sc),
+                                      "custom": Keybindings.shared.isCustomized(cid)]
+            if let warn = Keybindings.shared.osWarning(sc) { out["warn"] = warn }
+            reply(webView, id, out)
         case "resetShortcut":
             if let cid = body["cmd"] as? String {
                 Keybindings.shared.reset(cid)
@@ -219,8 +226,19 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
         case "beginShortcutCapture":
             Keybindings.shared.suspended = true
             (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            // Dead-man's switch: if the page never sends `end` (reload, JS crash,
+            // tab closed mid-record) the menu would stay stripped forever. Restore
+            // it automatically after a few seconds unless a newer capture began.
+            captureGen &+= 1
+            let gen = captureGen
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4) { [weak self] in
+                guard let self, self.captureGen == gen, Keybindings.shared.suspended else { return }
+                Keybindings.shared.suspended = false
+                (NSApp.delegate as? AppDelegate)?.rebuildMenu()
+            }
             reply(webView, id, ["ok": true])
         case "endShortcutCapture":
+            captureGen &+= 1 // invalidate any pending auto-restore
             Keybindings.shared.suspended = false
             (NSApp.delegate as? AppDelegate)?.rebuildMenu()
             reply(webView, id, ["ok": true])
