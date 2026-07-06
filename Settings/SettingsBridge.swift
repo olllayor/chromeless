@@ -90,6 +90,21 @@ final class SettingsBridge: NSObject, WKScriptMessageHandler {
         case "clearPermissions":
             SitePermissionStore.shared.clearAll()
 
+        // --- History page (chromeless://history) ---
+        case "historyList":
+            let q = body["q"] as? String ?? ""
+            let offset = body["offset"] as? Int ?? 0
+            let rows = HistoryStore.shared.entries(query: q, limit: 100, offset: offset).map {
+                ["url": $0.url, "title": $0.title, "t": $0.lastVisit] as [String: Any]
+            }
+            reply(webView, id, rows)
+        case "historyDelete":
+            if let u = body["url"] as? String { HistoryStore.shared.delete(url: u) }
+            reply(webView, id, ["ok": true])
+        case "historyClear":
+            HistoryStore.shared.clearAll()
+            reply(webView, id, ["ok": true])
+
         // --- Privacy: clear browsing data ---
         case "clearData":
             let flags = body["flags"] as? [String: Any] ?? [:]

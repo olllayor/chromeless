@@ -101,7 +101,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc func openSettings(_ sender: Any?) {
-        let url = URL(string: "\(InternalScheme.scheme)://settings")!
+        openInternalPage("settings")
+    }
+
+    @objc func showHistory(_ sender: Any?) {
+        openInternalPage("history")
+    }
+
+    private func openInternalPage(_ page: String) {
+        let url = URL(string: "\(InternalScheme.scheme)://\(page)")!
         if let wc = controllers.first(where: { $0.window?.isKeyWindow == true }) ?? controllers.first {
             wc.newTab(url: url)
         } else {
@@ -279,6 +287,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.removeAllItems()
             menu.addItem(withTitle: "Back", action: #selector(BrowserWindowController.goBackAction(_:)), keyEquivalent: "[")
             menu.addItem(withTitle: "Forward", action: #selector(BrowserWindowController.goForwardAction(_:)), keyEquivalent: "]")
+            menu.addItem(.separator())
+            let showAll = menu.addItem(withTitle: "Show All History",
+                                       action: #selector(showHistory(_:)), keyEquivalent: "y")
+            showAll.target = self
             menu.addItem(.separator())
             let recent = HistoryStore.shared.recentItems(limit: 10)
             for item in recent {

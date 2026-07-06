@@ -81,6 +81,58 @@ final class HistoryStore {
         return results
     }
 
+    struct Entry {
+        let url: String
+        let title: String
+        let lastVisit: Double
+    }
+
+    /// Paged history for chromeless://history — newest first, optionally
+    /// FTS-filtered by `query` (same sanitizing as omnibox search).
+    func entries(query: String = "", limit: Int = 100, offset: Int = 0) -> [Entry] {
+        let stmt: OpaquePointer?
+        let trimmed = query.trimmingCharacters(in: .whitespaces)
+        if trimmed.isEmpty {
+            stmt = db.prepare(
+                "SELECT url, title, last_visit FROM history_items " +
+                "ORDER BY last_visit DESC LIMIT ? OFFSET ?;")
+            guard let stmt else { return [] }
+            sqlite3_bind_int(stmt, 1, Int32(limit))
+            sqlite3_bind_int(stmt, 2, Int32(offset))
+        } else {
+            let allowed = CharacterSet.alphanumerics.union(.whitespaces).union(CharacterSet(charactersIn: ".-"))
+            let sanitized = String(trimmed.unicodeScalars.filter { allowed.contains($0) })
+                .trimmingCharacters(in: .whitespaces)
+            guard !sanitized.isEmpty else { return [] }
+            let ftsQuery = sanitized.split(separator: " ").map { "\"\($0)\"*" }.joined(separator: " ")
+            stmt = db.prepare(
+                "SELECT hi.url, hi.title, hi.last_visit FROM history_fts fts " +
+                "JOIN history_items hi ON hi.id = fts.rowid " +
+                "WHERE history_fts MATCH ? ORDER BY hi.last_visit DESC LIMIT ? OFFSET ?;")
+            guard let stmt else { return [] }
+            sqlite3_bind_text(stmt, 1, ftsQuery, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+            sqlite3_bind_int(stmt, 2, Int32(limit))
+            sqlite3_bind_int(stmt, 3, Int32(offset))
+        }
+        guard let stmt else { return [] }
+        var results: [Entry] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            results.append(Entry(url: String(cString: sqlite3_column_text(stmt, 0)),
+                                 title: String(cString: sqlite3_column_text(stmt, 1)),
+                                 lastVisit: sqlite3_column_double(stmt, 2)))
+        }
+        sqlite3_finalize(stmt)
+        return results
+    }
+
+    /// Remove one URL from history (FTS + visits follow via trigger/cascade).
+    func delete(url: String) {
+        guard let stmt = db.prepare("DELETE FROM history_items WHERE url = ?;") else { return }
+        sqlite3_bind_text(stmt, 1, url, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        sqlite3_step(stmt)
+        sqlite3_finalize(stmt)
+    }
+
     func clearAll() {
         db.exec("DELETE FROM history_items;")
         db.exec("DELETE FROM visits;")

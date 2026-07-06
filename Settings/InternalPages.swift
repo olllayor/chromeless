@@ -20,6 +20,7 @@ final class InternalScheme: NSObject, WKURLSchemeHandler {
         let body: String
         switch page {
         case "settings": body = settingsHTML
+        case "history": body = historyHTML
         default: body = "<!doctype html><meta charset=utf-8><body style='background:#0a0a0e'>"
         }
         let data = Data(body.utf8)
