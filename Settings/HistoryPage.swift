@@ -68,8 +68,12 @@ let historyHTML = """
   var pending = {}, nextId = 1;
   window.__clSettings = {
     reply: function (id, data) { if (pending[id]) { pending[id](data); delete pending[id]; } },
-    state: function () {}
+    // Match the chrome's accent (blue vs grayscale) instead of hardcoding blue.
+    state: function (s) {
+      if (s && s.accentHex) document.documentElement.style.setProperty('--accent', s.accentHex);
+    }
   };
+  bridge.postMessage({ action: 'get' });
   function request(action, extra) {
     return new Promise(function (res) {
       var id = nextId++; pending[id] = res;
@@ -120,16 +124,26 @@ let historyHTML = """
         '<span class="host">' + esc(hostOf(r.url)) + '</span></span>' +
         '<button class="icon" title="Remove from history">✕</button>';
       row.querySelector('button').onclick = function () {
-        request('historyDelete', { url: r.url }).then(function () { row.remove(); });
+        request('historyDelete', { url: r.url }).then(function () {
+          row.remove();
+          // The deleted row shifts every later item down one; without this the
+          // next OFFSET query would skip the entry that slid into its slot.
+          if (offset > 0) offset--;
+        });
       };
       card.appendChild(row);
     });
     list.dataset.lastDay = lastDay;
   }
 
+  // Bumped on every load; a stale in-flight reply (e.g. a "show more" landing
+  // after the search box reset the list) is dropped instead of corrupting offset.
+  var loadToken = 0;
   function load(append) {
     if (!append) offset = 0;
+    var token = ++loadToken;
     request('historyList', { q: curQuery, offset: offset }).then(function (rows) {
+      if (token !== loadToken) return;   // superseded
       render(rows || [], append);
       offset += (rows || []).length;
       document.getElementById('more').style.display =

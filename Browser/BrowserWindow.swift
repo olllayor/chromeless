@@ -744,7 +744,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             layoutOverlays()
             return
         }
-        guard tabManager.count > 1, let cur = tabManager.current else {
+        guard tabManager.count > 1, tabManager.current != nil else {
             showToast("Split view needs two tabs", symbol: "rectangle.split.2x1")
             return
         }
@@ -919,7 +919,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             // horizontally; on release it settles into the nearest slot. The
             // pan's movement threshold keeps plain clicks going to the click
             // recognizer untouched.
-            item.addGestureRecognizer(NSPanGestureRecognizer(target: self, action: #selector(tabItemPanned(_:))))
+            let pan = NSPanGestureRecognizer(target: self, action: #selector(tabItemPanned(_:)))
+            pan.delegate = item   // decline the drag when it starts on the close/audio button
+            item.addGestureRecognizer(pan)
             item.translatesAutoresizingMaskIntoConstraints = false
             item.layer?.zPosition = isSelected ? 10 : CGFloat(tabItems.count - i)
             let widthC = item.widthAnchor.constraint(equalToConstant: TabBarItem.maxWidth)
@@ -1004,18 +1006,33 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         for c in tabWidthConstraints { c.constant = per }
     }
 
+    /// Below this horizontal travel a pan is treated as a stationary press
+    /// (a click), not a reorder — so a click that drifts a hair past the click
+    /// recognizer's slop still selects the tab instead of being swallowed.
+    private static let tabDragThreshold: CGFloat = 4
+
     @objc private func tabItemPanned(_ g: NSPanGestureRecognizer) {
-        guard let item = g.view as? TabBarItem else { return }
+        // A rebuild during the drag (e.g. a background tab opened) can leave
+        // `item` orphaned with a stale index — bail rather than act on it.
+        guard let item = g.view as? TabBarItem, item.index < tabManager.count else { return }
         switch g.state {
-        case .began:
-            item.layer?.zPosition = 100
         case .changed:
             // Track the pointer horizontally only; the strip is a single row.
             let tx = g.translation(in: tabStack).x
-            item.layer?.setAffineTransform(CGAffineTransform(translationX: tx, y: 0))
+            if abs(tx) > Self.tabDragThreshold {
+                item.layer?.zPosition = 100   // lift only once it's really a drag
+                item.layer?.setAffineTransform(CGAffineTransform(translationX: tx, y: 0))
+            }
         case .ended, .cancelled:
             let tx = g.translation(in: tabStack).x
             item.layer?.setAffineTransform(.identity)
+            if g.state == .ended, abs(tx) <= Self.tabDragThreshold {
+                // Barely moved → it was a click. The click recognizer may have
+                // failed on the drift, so select here instead of dropping it.
+                switchToTab(tabManager.tabs[item.index])
+                refreshTabBar()
+                return
+            }
             // One slot per full item width (incl. stack gap) the pointer moved.
             let slotW = item.bounds.width + tabStack.spacing
             let delta = slotW > 0 ? Int((tx / slotW).rounded()) : 0
@@ -1023,7 +1040,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             if target != item.index {
                 tabManager.move(from: item.index, to: target)   // triggers refreshTabBar
             } else {
-                refreshTabBar()   // clears the lifted zPosition
+                refreshTabBar()   // settle back, clears the lifted zPosition
             }
         default:
             break
@@ -1576,7 +1593,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         statusBubbleHide?.cancel()
         let wasHidden = statusBubble.isHidden
         statusBubble.isHidden = false
-        layoutOverlays()   // resize/position for the new text
+        // Only the bubble's own frame needs updating — this fires on every <a>
+        // the cursor crosses, so a full-window layoutOverlays() here was a full
+        // chrome relayout per hovered link.
+        layoutStatusBubble()
         if wasHidden {
             statusBubble.alphaValue = 0
             NSAnimationContext.runAnimationGroup { ctx in
@@ -1597,10 +1617,23 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             NSAnimationContext.runAnimationGroup({ ctx in
                 ctx.duration = 0.12
                 self.statusBubble.animator().alphaValue = 0
-            }, completionHandler: { self.statusBubble.isHidden = true })
+            }, completionHandler: {
+                // A show that arrived mid-fade set alpha back to 1; don't hide
+                // a bubble that's now previewing a freshly-hovered link.
+                if self.statusBubble.alphaValue == 0 { self.statusBubble.isHidden = true }
+            })
         }
         statusBubbleHide = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.06, execute: work)
+    }
+
+    /// Position + size just the status bubble for its current text (bottom-left).
+    private func layoutStatusBubble() {
+        guard !statusBubble.isHidden, let b = window?.contentView?.bounds else { return }
+        let sbW = statusBubble.fittingWidth(maxWidth: b.width * 0.5)
+        let sbInset: CGFloat = 8
+        statusBubble.frame = NSRect(x: sbInset, y: sbInset, width: sbW, height: 24)
+        statusBubble.layoutLabel()
     }
 
     private func layoutOverlays() {
@@ -1706,12 +1739,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let progressY = zenModeEnabled ? b.height - 2 : b.height - chromeTop
         progressBar.frame = NSRect(x: 0, y: progressY, width: b.width * lastProgress, height: 2)
 
-        if !statusBubble.isHidden {
-            let sbW = statusBubble.fittingWidth(maxWidth: b.width * 0.5)
-            let sbInset: CGFloat = 8
-            statusBubble.frame = NSRect(x: sbInset, y: sbInset, width: sbW, height: 24)
-            statusBubble.layoutLabel()
-        }
+        layoutStatusBubble()
 
         let fbW: CGFloat = 360
         let fbH: CGFloat = 40

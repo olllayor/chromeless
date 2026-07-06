@@ -316,9 +316,13 @@ final class TabBarItem: NSView, NSGestureRecognizerDelegate {
     // the visible close button so its own action fires.
     func gestureRecognizer(_ gestureRecognizer: NSGestureRecognizer,
                            shouldAttemptToRecognizeWith event: NSEvent) -> Bool {
-        guard (gestureRecognizer as? NSClickGestureRecognizer)?.buttonMask == 0x1 else { return true }
+        // Applies to the item-wide select-click AND the reorder-pan; the
+        // right-click (buttonMask 0x2) context menu is left alone.
+        let isSelectClick = (gestureRecognizer as? NSClickGestureRecognizer)?.buttonMask == 0x1
+        let isReorderPan = gestureRecognizer is NSPanGestureRecognizer
+        guard isSelectClick || isReorderPan else { return true }
         // Let the close button and audio/mute button receive their own clicks
-        // instead of the item-wide select gesture swallowing them.
+        // instead of the item-wide select/reorder gesture swallowing them.
         for btn: NSButton in [closeButton, audioButton] where !btn.isHidden {
             let p = btn.convert(event.locationInWindow, from: nil)
             if btn.bounds.contains(p) { return false }
