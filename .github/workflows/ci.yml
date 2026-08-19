@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+jobs:
+  test:
+    name: Build & test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: swift --version
+      # The library target compiles the same sources build.sh uses (minus
+      # main.swift), so a green build here means the app sources still compile.
+      - name: Build
+        run: swift build
+      - name: Test
+        run: swift test
+      # build.sh is what ships the .app (whole-module swiftc -O, includes
+      # main.swift, which the SPM library target deliberately excludes).
+      - name: Build app
+        run: ./build.sh

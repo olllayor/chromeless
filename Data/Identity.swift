@@ -29,8 +29,8 @@ struct Identity: Equatable {
 }
 
 final class IdentityStore {
-    static let shared = IdentityStore()
-    private let db = DB.shared
+    static let shared = IdentityStore(db: .shared)
+    private let db: DB
 
     /// Fixed id for the built-in default identity. Its data store is the shared
     /// `.default()` jar, so upgrading users keep every existing session.
@@ -44,7 +44,17 @@ final class IdentityStore {
     /// process lifetime so every tab of one identity shares exactly one jar.
     private var stores: [UUID: WKWebsiteDataStore] = [:]
 
-    private init() {
+    /// The WebKit on-disk erase that `delete` performs for a persistent
+    /// identity. Split out as a hook because `WKWebsiteDataStore.remove` needs a
+    /// running app + runloop; tests stub it to a no-op so they can exercise the
+    /// rest of `delete` (row removal, binding cascade) without touching WebKit.
+    var removeDataStore: (UUID) -> Void = { uid in
+        guard #available(macOS 14.0, *) else { return }
+        DispatchQueue.main.async { WKWebsiteDataStore.remove(forIdentifier: uid) { _ in } }
+    }
+
+    init(db: DB) {
+        self.db = db
         ensureDefault()
     }
 
@@ -154,9 +164,8 @@ final class IdentityStore {
         // the just-closed tabs' web-content processes have released the store
         // (removing an in-use store is a no-op). `remove` also wipes the data, so
         // no separate wipeData call is needed.
-        if #available(macOS 14.0, *), !identity.ephemeral {
-            let uid = identity.id
-            DispatchQueue.main.async { WKWebsiteDataStore.remove(forIdentifier: uid) { _ in } }
+        if !identity.ephemeral {
+            removeDataStore(identity.id)
         }
     }
 
@@ -206,7 +215,7 @@ final class IdentityStore {
     /// Approximate registrable domain (eTLD+1). `mail.google.com` → `google.com`,
     /// `bbc.co.uk` → `bbc.co.uk`. Used so a rule for one host of a site also
     /// covers the site's auth/other subdomains (e.g. accounts.google.com).
-    func registrableDomain(_ host: String) -> String {
+    static func registrableDomain(_ host: String) -> String {
         let labels = host.lowercased().split(separator: ".").map(String.init)
         guard labels.count > 2 else { return host.lowercased() }
         let lastTwo = labels.suffix(2).joined(separator: ".")
@@ -219,8 +228,8 @@ final class IdentityStore {
     /// site's login subdomains follow it into the same container).
     func routedIdentity(forHost host: String) -> UUID? {
         if let id = binding(forHost: host) { return id }
-        let domain = registrableDomain(host)
-        return allBindings().first { registrableDomain($0.host) == domain }?.identityID
+        let domain = Self.registrableDomain(host)
+        return allBindings().first { Self.registrableDomain($0.host) == domain }?.identityID
     }
 
     /// The identity a host is pinned to, if any.

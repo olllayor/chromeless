@@ -9,19 +9,28 @@ import WebKit
 import SQLite3
 
 final class DB {
-    static let shared = DB()
-    private var db: OpaquePointer?
+    static let shared = DB(path: DB.defaultPath)
 
-    private init() {
+    /// Where the app's real database lives. Split out from init so tests can
+    /// open a throwaway database without ever touching this path.
+    static var defaultPath: String {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Chromeless", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let path = dir.appendingPathComponent("chromeless.sqlite").path
+        return dir.appendingPathComponent("chromeless.sqlite").path
+    }
+
+    private var db: OpaquePointer?
+
+    init(path: String) {
         if sqlite3_open(path, &db) != SQLITE_OK {
             fputs("chromeless: failed to open database\n", stderr)
         }
         migrate()
     }
+
+    /// A throwaway in-memory database (tests).
+    static func inMemory() -> DB { DB(path: ":memory:") }
 
     private func migrate() {
         exec("PRAGMA journal_mode=WAL;")

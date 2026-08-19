@@ -8,7 +8,7 @@ import WebKit
 
 enum BookmarkType: String, Codable { case folder, bookmark }
 
-struct BookmarkNode: Codable {
+struct BookmarkNode: Codable, Equatable {
     var type: BookmarkType
     var title: String
     var url: String?
@@ -16,15 +16,16 @@ struct BookmarkNode: Codable {
 }
 
 final class BookmarkStore {
-    static let shared = BookmarkStore()
+    static let shared = BookmarkStore(fileURL: FileManager.default
+        .urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("Chromeless", isDirectory: true)
+        .appendingPathComponent("bookmarks.json"))
     private var root: BookmarkNode
     private let fileURL: URL
     private var saveTimer: DispatchWorkItem?
 
-    private init() {
-        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("Chromeless", isDirectory: true)
-        fileURL = dir.appendingPathComponent("bookmarks.json")
+    init(fileURL: URL) {
+        self.fileURL = fileURL
         if let data = try? Data(contentsOf: fileURL),
            let loaded = try? JSONDecoder().decode(BookmarkNode.self, from: data) {
             root = loaded

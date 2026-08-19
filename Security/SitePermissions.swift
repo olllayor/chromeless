@@ -37,11 +37,16 @@ final class SitePermissionStore {
     static let shared = SitePermissionStore()
     private let defaultsKey = "SitePermissions"
 
+    /// Where decisions are persisted. Injectable so tests never touch the
+    /// app's real defaults domain.
+    private let defaults: UserDefaults
+
     // origin -> [permission.rawValue: decision.rawValue]
     private var table: [String: [String: String]]
 
-    private init() {
-        table = UserDefaults.standard.dictionary(forKey: defaultsKey)
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        table = defaults.dictionary(forKey: defaultsKey)
             as? [String: [String: String]] ?? [:]
     }
 
@@ -82,5 +87,5 @@ final class SitePermissionStore {
     /// Forget all sites.
     func clearAll() { table = [:]; persist() }
 
-    private func persist() { UserDefaults.standard.set(table, forKey: defaultsKey) }
+    private func persist() { defaults.set(table, forKey: defaultsKey) }
 }

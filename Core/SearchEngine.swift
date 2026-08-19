@@ -9,6 +9,10 @@ import WebKit
 enum SearchEngine: String, CaseIterable {
     case google, duckduckgo, brave
 
+    /// Where preferences live. Injectable so tests use a dedicated suite
+    /// domain instead of the app's real defaults.
+    static var defaults: UserDefaults = .standard
+
     var label: String {
         switch self {
         case .google: return "Google"
@@ -37,13 +41,13 @@ enum SearchEngine: String, CaseIterable {
     }
 
     static var current: SearchEngine {
-        SearchEngine(rawValue: UserDefaults.standard.string(forKey: "DefaultSearchEngine") ?? "") ?? .google
+        SearchEngine(rawValue: defaults.string(forKey: "DefaultSearchEngine") ?? "") ?? .google
     }
 
     /// Whether the address bar sends keystrokes to the engine for suggestions.
     /// Helium-style default: on.
     static var suggestionsEnabled: Bool {
-        UserDefaults.standard.object(forKey: "SearchSuggestions") as? Bool ?? true
+        defaults.object(forKey: "SearchSuggestions") as? Bool ?? true
     }
 
     /// Results-page URL for a finished query string.
@@ -82,7 +86,7 @@ enum SearchSuggest {
     }
 
     /// Parses `[query, [suggestions…]]`. Trailing metadata elements ignored.
-    private static func parse(_ data: Data) -> [String]? {
+    static func parse(_ data: Data) -> [String]? {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [Any],
               root.count >= 2, let list = root[1] as? [Any] else { return nil }
         return list.compactMap { $0 as? String }

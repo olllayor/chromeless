@@ -12,13 +12,31 @@ import WebKit
 // entitlement, so it works on an ad-hoc-signed build. This is the only path a
 // third-party macOS WKWebView has: Safari's native AutoFill and the system
 // Passwords app are not vended to us.
+//
+// Scoping: the login keychain is one shared store — every app's internet
+// passwords (Safari, Mail, Chrome, …) live in the same kSecClassInternetPassword
+// table, keyed by server/account. Querying on class+server alone therefore
+// matched *other apps'* credentials too: the Settings ▸ Passwords list could
+// display them, and save/delete could clobber them on a server+account
+// collision. We tag every item we write with a per-app kSecAttrSecurityDomain
+// and include it in every query so we only ever see our own.
+//
+// Note: kSecAttrService is the usual discriminator but it only exists on
+// kSecClassGenericPassword — internet-password items reject it with
+// errSecNoSuchAttr. kSecAttrSecurityDomain is the internet-class analog and is
+// stored + queryable, so that's what we use.
 enum Vault {
     struct Credential { let username: String; let password: String }
+
+    /// Per-app discriminator stamped on every item we write and required by every
+    /// query. Reverse-DNS so it can't collide with a real security domain.
+    private static let scope = "com.chromeless.app"
 
     private static func query(host: String, account: String? = nil) -> [String: Any] {
         var q: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
             kSecAttrServer as String: host,
+            kSecAttrSecurityDomain as String: scope,
         ]
         if let account { q[kSecAttrAccount as String] = account }
         return q
@@ -75,10 +93,12 @@ enum Vault {
     }
 
     /// Every stored login (host + username), for the settings Passwords list.
-    /// Attributes only — passwords are fetched on demand behind auth.
+    /// Attributes only — passwords are fetched on demand behind auth. Strictly
+    /// scoped to our own items so this list never shows another app's logins.
     static func allEntries() -> [(host: String, username: String)] {
         let q: [String: Any] = [
             kSecClass as String: kSecClassInternetPassword,
+            kSecAttrSecurityDomain as String: scope,
             kSecMatchLimit as String: kSecMatchLimitAll,
             kSecReturnAttributes as String: true,
         ]

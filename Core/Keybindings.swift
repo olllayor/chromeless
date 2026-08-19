@@ -35,6 +35,15 @@ final class Keybindings {
     static let shared = Keybindings()
     private let defaultsKey = "CustomShortcuts"
 
+    /// Where overrides are persisted. Injectable so tests never touch the app's
+    /// real defaults domain.
+    private let defaults: UserDefaults
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        load()
+    }
+
     /// The modifiers we persist / match on. (Ignores caps-lock, fn, numeric pad.)
     static let relevantMods: NSEvent.ModifierFlags = [.command, .control, .option, .shift]
 
@@ -92,8 +101,6 @@ final class Keybindings {
     /// equivalents so the raw keystroke reaches the web recorder instead of
     /// firing a menu command. Toggled via the bridge; rebuild the menu after.
     var suspended = false
-
-    private init() { load() }
 
     // MARK: Lookup
 
@@ -259,7 +266,7 @@ final class Keybindings {
     }
 
     private func load() {
-        guard let raw = UserDefaults.standard.dictionary(forKey: defaultsKey) as? [String: String] else { return }
+        guard let raw = defaults.dictionary(forKey: defaultsKey) as? [String: String] else { return }
         for (id, s) in raw {
             guard byId[id] != nil, let sc = Self.decode(s), !sc.key.isEmpty else { continue }
             // Ignore anything that would shadow a fixed built-in (belt-and-suspenders
@@ -272,6 +279,6 @@ final class Keybindings {
     private func save() {
         var raw: [String: String] = [:]
         for (id, sc) in overrides { raw[id] = Self.encode(sc) }
-        UserDefaults.standard.set(raw, forKey: defaultsKey)
+        defaults.set(raw, forKey: defaultsKey)
     }
 }

@@ -37,10 +37,14 @@ struct Bang {
 }
 
 enum Bangs {
+    /// Where the feature flag lives. Injectable so tests use a dedicated
+    /// suite domain instead of the app's real defaults.
+    static var defaults: UserDefaults = .standard
+
     /// Settings ▸ General ▸ Features toggle. Off → no bang resolution and no
     /// bang suggestion rows; `!w cats` falls through to a plain search.
     static var enabled: Bool {
-        UserDefaults.standard.object(forKey: "BangsEnabled") as? Bool ?? true
+        defaults.object(forKey: "BangsEnabled") as? Bool ?? true
     }
 
     /// Curated starter set of the most-used bangs. Bundled (no network), so

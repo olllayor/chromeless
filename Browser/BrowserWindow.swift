@@ -53,6 +53,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     private let findCloseButton = NSButton()
     private let findStatusLabel = NSTextField(labelWithString: "")
     private var lastFindQuery: String?
+    /// Proxy for WebKit's private `_findDelegate` (match counting). WebKit holds
+    /// it weakly, so the controller must retain it for the callbacks to fire.
+    private let findDelegate = FindDelegateProxy()
     private var hudW: CGFloat = 620
     private let downloadsOverlay = NSVisualEffectView()
     private let downloadsList = DownloadsListView()
@@ -332,45 +335,81 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         })
     }
 
-    @objc func findNext(_ sender: Any?) {
-        guard let query = findField.stringValue.nilIfEmpty else { return }
-        lastFindQuery = query
-        let config = WKFindConfiguration()
-        config.backwards = false
-        config.wraps = true
-        webView.find(query, configuration: config) { [weak self] result in
-            DispatchQueue.main.async {
-                self?.findStatusLabel.stringValue = result.matchFound ? "✓" : "✗"
-            }
-        }
-    }
+    @objc func findNext(_ sender: Any?) { performFind(backwards: false) }
 
-    @objc func findPrev(_ sender: Any?) {
-        guard let query = findField.stringValue.nilIfEmpty else { return }
-        lastFindQuery = query
-        let config = WKFindConfiguration()
-        config.backwards = true
-        config.wraps = true
-        webView.find(query, configuration: config) { [weak self] result in
-            DispatchQueue.main.async {
-                self?.findStatusLabel.stringValue = result.matchFound ? "✓" : "✗"
-            }
-        }
-    }
+    @objc func findPrev(_ sender: Any?) { performFind(backwards: true) }
 
-    @objc private func runFind() {
+    @objc private func runFind() { performFind(backwards: false) }
+
+    /// Run a find in the given direction and refresh the match-count label.
+    /// Prefers WebKit's private counting find; falls back to the public
+    /// boolean-only API if the private selectors are ever removed.
+    private func performFind(backwards: Bool) {
         guard let query = findField.stringValue.nilIfEmpty else {
             findStatusLabel.stringValue = ""
             return
         }
         lastFindQuery = query
+        if performCountingFind(query, backwards: backwards) { return }
         let config = WKFindConfiguration()
-        config.backwards = false
+        config.backwards = backwards
         config.wraps = true
         webView.find(query, configuration: config) { [weak self] result in
             DispatchQueue.main.async {
                 self?.findStatusLabel.stringValue = result.matchFound ? "✓" : "✗"
             }
+        }
+    }
+
+    /// WebKit's private find-in-page with match counting. The public
+    /// `WKWebView.find` reports only whether *a* match was found (it hardcodes
+    /// the count to 1); the total and the active match's index arrive on the
+    /// private `_findDelegate` instead. Returns false when the private selectors
+    /// are unavailable so the caller can fall back to the public API.
+    private func performCountingFind(_ query: String, backwards: Bool) -> Bool {
+        let setDelegateSel = NSSelectorFromString("_setFindDelegate:")
+        let findSel = NSSelectorFromString("_findString:options:maxCount:")
+        guard webView.responds(to: setDelegateSel), webView.responds(to: findSel),
+              let setDelegateMethod = class_getInstanceMethod(type(of: webView), setDelegateSel),
+              let findMethod = class_getInstanceMethod(type(of: webView), findSel) else { return false }
+        findDelegate.owner = self   // WebKit holds the delegate weakly; we retain it.
+        typealias SetDelegateFn = @convention(c) (AnyObject, Selector, AnyObject) -> Void
+        let setDelegate = unsafeBitCast(method_getImplementation(setDelegateMethod), to: SetDelegateFn.self)
+        setDelegate(webView, setDelegateSel, findDelegate)
+        var options: UInt = Self.findCaseInsensitive | Self.findWrapAround | Self.findDetermineMatchIndex
+        if backwards { options |= Self.findBackwards }
+        typealias FindFn = @convention(c) (AnyObject, Selector, NSString, UInt, UInt) -> Void
+        let find = unsafeBitCast(method_getImplementation(findMethod), to: FindFn.self)
+        find(webView, findSel, query as NSString, options, Self.findMaxCount)
+        return true
+    }
+
+    // `_WKFindOptions` bits (WebKit private; verified against the running
+    // WebKit). Case-insensitive matches the behaviour the bar had with the
+    // public API; DetermineMatchIndex is what makes WebKit actually count the
+    // matches and report which one it landed on.
+    private static let findCaseInsensitive: UInt = 1 << 0
+    private static let findBackwards: UInt = 1 << 3
+    private static let findWrapAround: UInt = 1 << 4
+    private static let findDetermineMatchIndex: UInt = 1 << 9
+    /// WebKit reports counts above this cap as the sentinel value (cap + 1).
+    private static let findMaxCount: UInt = 500
+
+    /// Private find delegate callback: total matches plus the 0-based index of
+    /// the match the find landed on. Rendered as "active/total" (e.g. "3/12").
+    func findDidCount(_ matches: UInt, activeIndex: Int, for query: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, query == self.lastFindQuery, !self.findBar.isHidden else { return }
+            let total = matches > Self.findMaxCount ? "\(Self.findMaxCount)+" : "\(matches)"
+            self.findStatusLabel.stringValue = "\(activeIndex + 1)/\(total)"
+        }
+    }
+
+    /// Private find delegate callback: the query matched nothing.
+    func findDidFail(for query: String) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, query == self.lastFindQuery, !self.findBar.isHidden else { return }
+            self.findStatusLabel.stringValue = "0/0"
         }
     }
 
@@ -444,6 +483,13 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         let identity = identityID.flatMap { IdentityStore.shared.identity($0) }
             ?? IdentityStore.shared.defaultIdentity
         let wv = WebViewFactory.dequeueWebView(for: identity)
+        // Wire the navigation/UI delegates at creation, not just on selection.
+        // A background (cmd-click) tab starts loading immediately and must record
+        // history, apply per-site zoom, and intercept downloads from the first
+        // byte — previously delegates were only assigned in switchToTab, so a
+        // background tab did none of that until it was first clicked.
+        wv.navigationDelegate = self
+        wv.uiDelegate = self
         let tab = Tab(webView: wv)
         tab.identityID = identity.id
         if UserDefaults.standard.bool(forKey: "NewTabNextToActive") {
@@ -1033,21 +1079,48 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     /// recognizer's slop still selects the tab instead of being swallowed.
     private static let tabDragThreshold: CGFloat = 4
 
+    /// Vertical travel (dominating the horizontal) at which a tab drag stops
+    /// being a reorder and becomes a detach — releasing then moves the tab to
+    /// a new window under the cursor.
+    private static let tabDetachThreshold: CGFloat = 40
+
+    /// The tab item currently classified as a detach drag (a diagonal drag must
+    /// stay a detach once it crosses the threshold, even if it levels out).
+    private var detachingTabItem: TabBarItem?
+
     @objc private func tabItemPanned(_ g: NSPanGestureRecognizer) {
         // A rebuild during the drag (e.g. a background tab opened) can leave
         // `item` orphaned with a stale index — bail rather than act on it.
         guard let item = g.view as? TabBarItem, item.index < tabManager.count else { return }
+        let tx = g.translation(in: tabStack).x
+        let ty = g.translation(in: tabStack).y
         switch g.state {
         case .changed:
-            // Track the pointer horizontally only; the strip is a single row.
-            let tx = g.translation(in: tabStack).x
-            if abs(tx) > Self.tabDragThreshold {
+            if detachingTabItem === item || (abs(ty) > Self.tabDetachThreshold && abs(ty) > abs(tx)) {
+                // Pulled out of the strip: follow the cursor in 2D, dimmed as
+                // the "this will detach" cue.
+                detachingTabItem = item
+                item.layer?.zPosition = 100
+                item.layer?.setAffineTransform(CGAffineTransform(translationX: tx, y: ty))
+                item.alphaValue = 0.7
+            } else if abs(tx) > Self.tabDragThreshold {
+                // Track the pointer horizontally only; the strip is a single row.
                 item.layer?.zPosition = 100   // lift only once it's really a drag
                 item.layer?.setAffineTransform(CGAffineTransform(translationX: tx, y: 0))
             }
         case .ended, .cancelled:
-            let tx = g.translation(in: tabStack).x
+            let wasDetaching = detachingTabItem === item
+            detachingTabItem = nil
             item.layer?.setAffineTransform(.identity)
+            item.alphaValue = 1
+            if wasDetaching {
+                if g.state == .ended {
+                    detachToNewWindow(tabManager.tabs[item.index], dropPointInWindow: g.location(in: nil))
+                } else {
+                    refreshTabBar()   // cancelled mid-detach — settle back
+                }
+                return
+            }
             if g.state == .ended, abs(tx) <= Self.tabDragThreshold {
                 // Barely moved → it was a click. The click recognizer may have
                 // failed on the drift, so select here instead of dropping it.
@@ -1069,6 +1142,30 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         }
     }
 
+    /// Drag-to-detach: spawn a window under the drop point and move the tab
+    /// into it. The drop point is converted to screen coordinates before the
+    /// detach, since detaching a window's last tab closes this window.
+    private func detachToNewWindow(_ tab: Tab, dropPointInWindow: NSPoint) {
+        guard let delegate = NSApp.delegate as? AppDelegate, let window else { return }
+        let screenPoint = window.convertPoint(toScreen: dropPointInWindow)
+        delegate.openWindow(url: nil)
+        guard let target = delegate.controllers.last, target !== self,
+              let targetWindow = target.window else { return }
+        // Land the new window so the cursor sits near its tab strip (~40pt
+        // below the top edge), clamped fully onto the screen.
+        if let scr = window.screen ?? NSScreen.main {
+            let v = scr.visibleFrame
+            let f = targetWindow.frame
+            var origin = NSPoint(x: screenPoint.x - f.width / 2,
+                                 y: screenPoint.y - (f.height - 40))
+            origin.x = max(v.minX, min(origin.x, v.maxX - f.width))
+            origin.y = max(v.minY, min(origin.y, v.maxY - f.height))
+            targetWindow.setFrameOrigin(origin)
+        }
+        detach(tab)
+        target.adopt(tab, replacingPlaceholder: true)
+    }
+
     @objc private func tabItemClicked(_ sender: NSClickGestureRecognizer) {
         guard let item = sender.view as? TabBarItem else { return }
         guard item.index < tabManager.count else { return }
@@ -1081,6 +1178,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         guard idx < tabManager.count else { return }
         let tab = tabManager.tabs[idx]
         dissolveSplitIfInvolved(tab)
+        ClosedTabStore.push(tab.url)   // ⌘⇧T restores ✕-closed tabs too
         if tabManager.count == 1 {
             window?.close()
         } else {
@@ -1140,6 +1238,10 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     /// Boxes a (tab, target identity) pair for the "Move to container" menu item.
     private final class MoveRequest { let tab: Tab; let identityID: UUID
         init(_ t: Tab, _ i: UUID) { tab = t; identityID = i } }
+
+    /// Boxes a (tab, target window) pair for the "Move Tab to Window" submenu.
+    private final class WindowMoveRequest { let tab: Tab; let target: BrowserWindowController
+        init(_ t: Tab, _ w: BrowserWindowController) { tab = t; target = w } }
 
     /// Repaint the toolbar avatar to reflect the current tab's container.
     private func updateIdentityAvatar() {
@@ -1275,6 +1377,79 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         refreshTabBar()
     }
 
+    // MARK: Moving tabs between windows
+
+    /// Release a tab from this window without destroying it: its web view is
+    /// pulled from the hierarchy and the tab removed from the manager, ready
+    /// for another window to adopt. Deliberately bypasses ClosedTabStore — a
+    /// moved tab is not a closed one, so ⌘⇧T must not "restore" it.
+    func detach(_ tab: Tab) {
+        let wasCurrent = tabManager.current === tab
+        dissolveSplitIfInvolved(tab)
+        tab.webView.removeFromSuperview()
+        tabManager.close(tab)   // keeps currentIndex / mruOrder consistent
+        if tabManager.tabs.isEmpty {
+            // Its content lives on in the destination window, so the empty
+            // shell goes. Safe: callers always open the destination first, so
+            // the app never reaches zero windows.
+            window?.close()
+            return
+        }
+        if wasCurrent {
+            switchToTab(tabManager.tabs[tabManager.currentIndex])
+        }
+    }
+
+    /// Take in a tab detached from another window. The live web view moves
+    /// (scroll/form/media state survives); switchToTab re-binds delegates,
+    /// KVO, and chrome to this window. With `replacingPlaceholder` the fresh
+    /// window's seeded start-page tab is dropped instead of kept.
+    func adopt(_ tab: Tab, replacingPlaceholder: Bool = false) {
+        if replacingPlaceholder, tabManager.count == 1, let placeholder = tabManager.tabs.first {
+            placeholder.webView.removeFromSuperview()
+            tabManager.replaceAll(with: tab)
+        } else {
+            tabManager.tabs.append(tab)
+        }
+        switchToTab(tab)   // select() inside fires refreshTabBar
+        // The new window was seeded with loadStartPage() (onStartPage = true).
+        // A moved tab carries real content, so clear the flag or updateURLField
+        // would keep showing the "Search Google" placeholder over the live URL.
+        // Safe for a blank-tab edge case: updateURLField also checks the URL
+        // directly and still shows the placeholder for about:blank.
+        onStartPage = false
+    }
+
+    /// Submenu of the other open windows a tab can be moved into.
+    private func moveToWindowMenu(for tab: Tab) -> NSMenu {
+        let menu = NSMenu()
+        for wc in (NSApp.delegate as? AppDelegate)?.controllers ?? [] where wc !== self {
+            let title = wc.window?.title.nilIfEmpty ?? "Chromeless"
+            let item = menu.addItem(withTitle: title,
+                                    action: #selector(moveTabToWindow(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = WindowMoveRequest(tab, wc)
+        }
+        return menu
+    }
+
+    @objc private func moveTabToNewWindow(_ sender: NSMenuItem) {
+        guard let tab = sender.representedObject as? Tab,
+              let delegate = NSApp.delegate as? AppDelegate else { return }
+        // Destination first: openWindow seeds it with a start-page tab, which
+        // adopt(replacingPlaceholder:) then swaps for the moved one.
+        delegate.openWindow(url: nil)
+        guard let target = delegate.controllers.last, target !== self else { return }
+        detach(tab)
+        target.adopt(tab, replacingPlaceholder: true)
+    }
+
+    @objc private func moveTabToWindow(_ sender: NSMenuItem) {
+        guard let req = sender.representedObject as? WindowMoveRequest else { return }
+        detach(req.tab)
+        req.target.adopt(req.tab)
+    }
+
     @objc private func promptNewIdentity(_ sender: Any?) {
         let alert = NSAlert()
         alert.messageText = "New Identity"
@@ -1311,6 +1486,14 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
         if IdentityStore.shared.all().count > 1 {
             let moveItem = menu.addItem(withTitle: "Move to Container", action: nil, keyEquivalent: "")
             moveItem.submenu = moveToIdentityMenu(for: tab)
+        }
+        menu.addItem(withTitle: "Move Tab to New Window",
+                     action: #selector(moveTabToNewWindow(_:)), keyEquivalent: "")
+            .representedObject = tab
+        // Move into another open window (only when there is one).
+        if (NSApp.delegate as? AppDelegate)?.controllers.count ?? 0 > 1 {
+            let moveItem = menu.addItem(withTitle: "Move Tab to Window", action: nil, keyEquivalent: "")
+            moveItem.submenu = moveToWindowMenu(for: tab)
         }
         menu.addItem(.separator())
         menu.addItem(withTitle: "Close Tab", action: #selector(closeTabFromContext(_:)), keyEquivalent: "w")
@@ -1745,6 +1928,7 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
         findStatusLabel.font = ChromeFont.findStatus
         findStatusLabel.textColor = .secondaryLabelColor
+        findStatusLabel.alignment = .right
         findBar.addSubview(findStatusLabel)
 
         findNextButton.title = "▼"
@@ -1983,19 +2167,24 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
 
         let btnSize: CGFloat = 24
         let padding: CGFloat = 8
+        let gap: CGFloat = 4
+        let statusW: CGFloat = 56   // status label slot ("3/12" or "500+")
         var fbXPos: CGFloat = padding
         findPrevButton.frame = NSRect(x: fbXPos, y: (fbH - btnSize) / 2, width: btnSize, height: btnSize)
-        fbXPos += btnSize + 4
+        fbXPos += btnSize + gap
 
-        let fieldW = fbW - (padding * 2) - (btnSize * 4) - 12
+        // The field takes whatever remains after the fixed-width elements, so
+        // the trailing buttons always land inside the bar (the old fixed-width
+        // math overflowed the close button past the right edge).
+        let fieldW = fbW - padding * 2 - btnSize * 3 - statusW - gap * 4
         findField.frame = NSRect(x: fbXPos, y: (fbH - 20) / 2, width: fieldW, height: 20)
-        fbXPos += fieldW + 4
+        fbXPos += fieldW + gap
 
-        findStatusLabel.frame = NSRect(x: fbXPos, y: (fbH - 16) / 2, width: 40, height: 16)
-        fbXPos += 44
+        findStatusLabel.frame = NSRect(x: fbXPos, y: (fbH - 16) / 2, width: statusW, height: 16)
+        fbXPos += statusW + gap
 
         findNextButton.frame = NSRect(x: fbXPos, y: (fbH - btnSize) / 2, width: btnSize, height: btnSize)
-        fbXPos += btnSize + 4
+        fbXPos += btnSize + gap
 
         findCloseButton.frame = NSRect(x: fbXPos, y: (fbH - btnSize) / 2, width: btnSize, height: btnSize)
 
@@ -2098,6 +2287,12 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     }
 
     private func escapeToStart() -> Bool {
+        // Esc dismisses the topmost overlay before bailing to the start page,
+        // so a stray Esc with the find bar open doesn't lose the current page.
+        if !findBar.isHidden {
+            hideFindBar(nil)
+            return true
+        }
         if onStartPage { return false }
         loadStartPage()
         return true
@@ -2967,38 +3162,48 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
     // MARK: WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
-        let u = webView.url?.absoluteString
-        if u != nil && u != "about:blank" { onStartPage = false }
-        if !findBar.isHidden { hideFindBar(nil) }
-        // Apply the per-site zoom the moment the new document commits, before it
-        // paints, so there's no visible reflow from 100% → stored level.
+        // Per-site zoom applies to whichever document committed — background
+        // tabs included, so the level is already right when they're selected.
         if let host = webView.url?.host {
             let z = ZoomStore.zoom(for: host)
             if webView.pageZoom != z { webView.pageZoom = z }
         }
+        // The rest is window-level chrome state: only the tab currently on
+        // screen may touch it, or a background tab's commit would clear the
+        // visible tab's start-page flag or dismiss its find bar.
+        guard webView === self.webView else { return }
+        let u = webView.url?.absoluteString
+        if u != nil && u != "about:blank" { onStartPage = false }
+        if !findBar.isHidden { hideFindBar(nil) }
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        if let url = webView.url, !onStartPage,
-           let scheme = url.scheme, scheme == "http" || scheme == "https" {
+        let isCurrent = webView === self.webView
+        // Record visits from any tab, background included. The http(s) scheme
+        // check already excludes the start page (an HTML-string load with no
+        // URL); the onStartPage flag only needs to gate the visible tab.
+        if let url = webView.url, let scheme = url.scheme, scheme == "http" || scheme == "https",
+           !isCurrent || !onStartPage {
             HistoryStore.shared.recordVisit(url: url, title: webView.title ?? "")
         }
 
-        if let job = snapJob {
+        // CLI snapshot mode is single-window/single-tab: only the current
+        // view may trigger it.
+        if isCurrent, let job = snapJob {
             snapJob = nil
             runSnapJob(job)
         }
     }
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
-        handleLoadError(error)
+        handleLoadError(error, in: webView)
     }
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
-        handleLoadError(error)
+        handleLoadError(error, in: webView)
     }
 
-    private func handleLoadError(_ error: Error) {
+    private func handleLoadError(_ error: Error, in webView: WKWebView) {
         let e = error as NSError
         // Ignore cancelled loads and "frame load interrupted" (downloads, redirects).
         if e.code == NSURLErrorCancelled || e.code == 102 { return }
@@ -3006,6 +3211,9 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             fputs("chromeless: load failed: \(e.localizedDescription)\n", stderr)
             exit(1)
         }
+        // Only the visible tab reports failures — a background tab's error
+        // shouldn't toast over whatever you're actually looking at.
+        guard webView === self.webView else { return }
         showToast("Couldn’t load — \(e.localizedDescription)")
     }
 
@@ -3196,5 +3404,25 @@ final class BrowserWindowController: NSWindowController, NSWindowDelegate,
             for p in perms { store.set(originKey, p, allow ? .allow : .deny) }
         }
         decisionHandler(allow ? .grant : .deny)
+    }
+}
+
+/// Proxy implementing WebKit's private `_WKFindDelegate` methods so the find
+/// bar can show a match count. The protocol is private, so conformance can't be
+/// declared — the methods are exposed with the exact Objective-C selectors and
+/// WebKit's runtime dispatch finds them. WebKit holds the delegate weakly; the
+/// owning BrowserWindowController retains this proxy and receives the callbacks.
+final class FindDelegateProxy: NSObject {
+    weak var owner: BrowserWindowController?
+
+    @objc(_webView:didFindMatches:forString:withMatchIndex:)
+    func webView(_ webView: WKWebView, didFindMatches matches: UInt,
+                 forString string: String, withMatchIndex matchIndex: Int) {
+        owner?.findDidCount(matches, activeIndex: matchIndex, for: string)
+    }
+
+    @objc(_webView:didFailToFindString:)
+    func webView(_ webView: WKWebView, didFailToFindString string: String) {
+        owner?.findDidFail(for: string)
     }
 }

@@ -1,0 +1,259 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Chromeless — Project Assessment v2</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; }
+  html { font-size: 15px; }
+  body {
+    margin: 0; padding: 0;
+    background: #000; color: #ddd;
+    font: 1rem/1.55 -apple-system, system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 48px 24px 96px; }
+
+  h1 { font-size: 2.2rem; font-weight: 700; letter-spacing: -.025em; margin: 0 0 .1em; color: #fff; }
+  .subtitle { color: #999; font-size: 1.05rem; margin: 0 0 2rem; }
+  .meta { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 2.6rem; }
+  .meta-item { background: #0d0d0d; border: 1px solid #222; border-radius: 10px; padding: 8px 14px; }
+  .meta-item .l { font-size: .72rem; color: #777; text-transform: uppercase; letter-spacing: .05em; }
+  .meta-item .v { font-size: 1rem; color: #ddd; font-weight: 500; }
+
+  h2 { font-size: 1.45rem; font-weight: 650; letter-spacing: -.015em; margin: 2.8rem 0 .6rem; color: #fff; }
+  h2 small { font-weight: 400; font-size: .85rem; color: #888; margin-left: 10px; }
+  h3 { font-size: 1.1rem; font-weight: 600; margin: 1.6rem 0 .2rem; color: #eee; }
+
+  p, li { color: #ccc; }
+  p { margin: .4rem 0 .9rem; }
+  li { margin: .25rem 0; }
+
+  .card { background: #0a0a0a; border: 1px solid #1e1e1e; border-radius: 12px; padding: 18px 22px; margin: 1rem 0; }
+
+  .pill { display: inline-block; font-size: .72rem; font-weight: 600; padding: 2px 9px; border-radius: 5px; margin-right: 6px; vertical-align: 1px; }
+  .pill.p0 { background: #3d0a0a; color: #e06060; }
+  .pill.p1 { background: #3d2e0a; color: #dbc05c; }
+  .pill.p2 { background: #0a2a3d; color: #5cb8db; }
+  .pill.p3 { background: #1c1c1c; color: #999; }
+  .pill.go { background: #0a3d2e; color: #5cdb9e; }
+  .pill.fix { background: #0a3d2e; color: #5cdb9e; }
+
+  table { width: 100%; border-collapse: collapse; margin: .8rem 0; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid #1a1a1a; vertical-align: top; }
+  th { color: #888; font-size: .78rem; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; border-bottom-color: #2a2a2a; }
+  td:first-child { color: #ddd; }
+
+  code { font-size: .84rem; background: #0f0f0f; border: 1px solid #222; border-radius: 4px; padding: 1px 5px; color: #bbb; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .ref { color: #888; font-size: .82rem; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+  hr { border: none; border-top: 1px solid #1a1a1a; margin: 2.4rem 0; }
+
+  .verdict { background: #0a0a0a; border: 1px solid #2a2a2a; border-radius: 14px; padding: 22px 26px; margin: 1.4rem 0; }
+  .correct { color: #5cdb9e; }
+  .wrong { color: #e06060; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Chromeless</h1>
+<p class="subtitle">Project assessment v2. A full re-investigation of the codebase: verified bugs, documentation drift, structural debt, and a prioritized work queue. Supersedes the v1 assessment from earlier today.</p>
+
+<div class="meta">
+  <div class="meta-item"><span class="l">Language</span><div class="v">Swift 5</div></div>
+  <div class="meta-item"><span class="l">Engine</span><div class="v">WKWebView</div></div>
+  <div class="meta-item"><span class="l">Platform</span><div class="v">macOS 13.0+</div></div>
+  <div class="meta-item"><span class="l">Source</span><div class="v">38 files, ~8,800 lines</div></div>
+  <div class="meta-item"><span class="l">Dependencies</span><div class="v">Zero</div></div>
+  <div class="meta-item"><span class="l">Last commit</span><div class="v">2026-07-07 (6 weeks idle)</div></div>
+</div>
+
+<h2>Bottom line</h2>
+<div class="verdict">
+<p>Chromeless is in strong shape. Zero dependencies, clean module boundaries, security handled with real thought (origin-verified bridges, Keychain storage, CSP on internal pages, sanitized downloads), and a build script that is fully current. It has quietly grown from the single-file app the README describes into a ~30-feature browser: tabs, split view, history with FTS search, downloads, multi-account containers, autofill with Touch ID, customizable shortcuts, content blocking.</p>
+<p>The pressing work is not features. This pass found <strong>three verified bugs</strong> (an unscoped Keychain query that exposes other apps' passwords in Settings, background tabs loading with no navigation delegate, and a close path that defeats ⌘⇧T restore), <strong>a README that describes a different product</strong>, ~150 lines of dead HUD code, a 3,200-line window controller that keeps accreting, and zero tests or CI. All of it is fixable in small, independent steps.</p>
+</div>
+
+<h2>Corrections to the v1 assessment</h2>
+<p>Three v1 items do not survive contact with the code. Recorded here so they are not implemented:</p>
+<div class="card">
+<table>
+<tr><th style="width:42%">v1 claim</th><th>Reality (verified)</th></tr>
+<tr><td class="wrong">"Tab widths don't reflow on resize"</td><td>False. <code>updateTabWidths()</code> runs inside <code>layoutOverlays()</code>, which <code>LayoutReportingView.onLayout</code> fires on every resize. <span class="ref">BrowserWindow.swift:163, 1883</span></td></tr>
+<tr><td class="wrong">"No keyboard shortcut for the Downloads panel"</td><td>False. ⌘⇧J exists and is wired to <code>toggleDownloads</code>. The real friction is only that ⌘⇧J collides with DevTools-console muscle memory from other browsers. <span class="ref">Keybindings.swift:79, AppDelegate.swift:290</span></td></tr>
+<tr><td class="wrong">"Window position resets every launch" (as a bug)</td><td>Intentional. The code comment says so: Helium-style center-window-on-launch. Debatable as a product choice, not a bug. <span class="ref">BrowserWindow.swift:209-217</span></td></tr>
+</table>
+</div>
+
+<h2>P0: verified bugs <small>correctness and trust, fix first</small></h2>
+
+<div class="card">
+<h3><span class="pill p0">P0</span>1. The password vault is not scoped to this app</h3>
+<p><code>Vault.query</code> builds Keychain queries with only <code>kSecClass</code> + <code>kSecAttrServer</code>. There is no <code>kSecAttrService</code>. Consequences, all verified by reading the code:</p>
+<ul>
+<li><code>Vault.allEntries()</code> enumerates <em>every</em> internet-password item in the user's login keychain. Settings ▸ Passwords can display credentials saved by other applications.</li>
+<li><code>Vault.delete</code> and the update path of <code>Vault.save</code> can delete or overwrite another app's keychain item if server + account happen to collide.</li>
+</ul>
+<p class="ref">Security/Vault.swift:18-25 (query), 29-42 (save), 73-75 (delete), 79-93 (allEntries)</p>
+<p><span class="pill fix">Fix</span>Add a constant <code>kSecAttrService</code> (e.g. <code>"com.chromeless.app"</code>) to every query. One caveat: items already saved without the attribute become invisible afterward, so either migrate them on first launch (copy-and-delete) or accept that users re-save once.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p0">P0</span>2. Background tabs load with no navigation delegate</h3>
+<p><code>newTab(url:background:)</code> starts the load immediately for ⌘-clicked background tabs, but <code>navigationDelegate</code>/<code>uiDelegate</code> are only assigned for the first tab at window setup and later inside <code>switchToTab</code>. The web-view factory assigns neither. A background tab therefore loads with no delegate until it is first selected:</p>
+<ul>
+<li>the visit is never recorded in history (<code>didFinish</code> never fires for it);</li>
+<li>per-site zoom is not applied;</li>
+<li>load errors are not surfaced;</li>
+<li>a response that should become a download (<code>decidePolicyFor navigationResponse</code>) is not intercepted.</li>
+</ul>
+<p class="ref">Browser/BrowserWindow.swift:443-461 (background load), 692-693 (delegates in switchToTab), 181-182 (first tab only); Browser/WebViewFactory.swift assigns none</p>
+<p><span class="pill fix">Fix</span>Assign both delegates in <code>newTab</code> right after <code>dequeueWebView</code> (or in the factory), not only in <code>switchToTab</code>.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p0">P0</span>3. Closing the last tab skips the recently-closed stack</h3>
+<p><code>closeCurrentTab</code> (⌘W) pushes the URL onto <code>ClosedTabStore</code> before closing. The tab-strip close button path does not: when one tab remains, <code>tabItemCloseClicked</code> closes the window with no push, so ⌘⇧T cannot recover it.</p>
+<p class="ref">Browser/BrowserWindow.swift:1065-1076 vs closeCurrentTab at 462-464</p>
+<p><span class="pill fix">Fix</span>One line: <code>ClosedTabStore.push(tab.url)</code> before <code>window?.close()</code>.</p>
+</div>
+
+<h2>P0: documentation drift <small>the README describes a different product</small></h2>
+<div class="card">
+<table>
+<tr><th style="width:44%">What it says</th><th>What is true now</th></tr>
+<tr><td>"No tabs, no toolbar, no address bar, no chrome at all"</td><td>All four exist. Tabs, toolbar, centered omnibox, full chrome with zen mode to hide it.</td></tr>
+<tr><td>"A native macOS app in one Swift file"</td><td>38 files, ~8,800 lines. The Settings ▸ About section still repeats it: "One file." <span class="ref">SettingsPage.swift:339</span></td></tr>
+<tr><td>"~450 KB built"</td><td>Closer to ~650 KB now.</td></tr>
+<tr><td>⌘L opens a "floating HUD"</td><td>The HUD is dead code (see below). ⌘L focuses the inline omnibox.</td></tr>
+<tr><td>Keystroke table with 11 shortcuts</td><td>~15 more shipped unlisted: ⌘T/⌘⇧T, ⌘1-9, ⌃⇥, ⌘Y, ⌘,, ⌘F/⌘G, ⌘D, ⌘⇧E split view, ⌘⇧L frameless, ⌘⇧P PiP, ⌘⇧J downloads, ⌘⌥T tab bar. The in-app start page already documents them, contradicting the README.</td></tr>
+<tr><td>"Deliberately absent: tabs, find-in-page, downloads, history UI, extensions"</td><td>Four of the five now exist. Only extensions remain absent.</td></tr>
+<tr><td>Storage lives in <code>~/Library/WebKit/...</code></td><td>Also <code>~/Library/Application Support/Chromeless/</code> (chromeless.sqlite, bookmarks.json, Favicons/) plus UserDefaults.</td></tr>
+<tr><td><code>chromeless.entitlements</code> comment: macOS honors the passkey entitlement on ad-hoc builds</td><td>Contradicted by the README and build.sh, which say ad-hoc builds claiming it get instant SIGKILL (verified by you). The entitlements comment is stale.</td></tr>
+</table>
+<p>Repo hygiene notes: a 647 KB built binary sits at the repo root (gitignored), and <code>plan/</code> and <code>docs/</code> are gitignored, so the design history only exists in local clones.</p>
+</div>
+
+<h2>P1: structural debt</h2>
+
+<div class="card">
+<h3><span class="pill p1">P1</span>Dead code: the entire HUD subsystem (~150 lines)</h3>
+<p><code>showHUD()</code> has zero callers; ⌘L now routes through <code>AppDelegate.openLocation</code> to the inline omnibox. That leaves unreachable: the HUD build block, its layout branch, <code>commitHUD</code>, <code>updateSuggestions</code>, <code>suggestionRowClicked</code>, every <code>isHUD:</code> branch in the suggestion machinery, and the mouse-monitor HUD dismiss. Related dead items: <code>BrowserWindowController.openLocation</code> (shadowed by the AppDelegate version), <code>BookmarkStore.findFolder</code>, four unused <code>ChromeFont</code> suggestion fonts, the permanently-hidden <code>tabBarSeparator</code>, constant-zero <code>tabToolbarOverlap</code>, and <code>pullEnabled</code> (never set false; no setting exposes it).</p>
+<p><span class="pill fix">Fix</span>Delete it. Removing the HUD also deletes half of the duplicated suggestion-keyboard handling for free.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p1">P1</span>The write-only <code>visits</code> table</h3>
+<p>Every page load inserts into <code>visits</code> (<span class="ref">Data/History.swift:39-45</span>). Nothing ever reads it. Either build something on it (visit counts, "frequently visited" on the start page) or drop the writes.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p1">P1</span>BrowserWindowController is a 3,200-line god object</h3>
+<p>~60 stored UI properties and 7 protocol conformances (window delegate, both WK delegates, text field delegate, menu validation, gesture delegate). <code>buildChrome</code> is ~320 lines; <code>layoutOverlays</code> is ~170 lines of manual frame math; the tab-close choreography (dissolve split, remove from hierarchy, close, switch) is copy-pasted across six call sites; KVO setup is duplicated between <code>observeWebView</code> and <code>switchToTab</code>; find is triplicated (<code>findNext</code>/<code>findPrev</code>/<code>runFind</code> differ only in direction).</p>
+<p><span class="pill fix">Fix</span>Extract into <code>Browser/</code> files: FindBarController, SuggestionsController, DownloadsPanel, ZenModeController, SiteSettingsPopover, AutofillBanner. The controller keeps navigation policy and tab orchestration. Also collapse to one <code>find(direction:)</code>, one KVO-setup helper, and one <code>close(tab:)</code> primitive.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p1">P1</span>Zero tests, zero CI</h3>
+<p>No test target, no <code>Package.swift</code>, no GitHub Actions, no lint config. The irony: the purest logic in the app is already static and stateless and trivially testable: <code>smartURL</code>, <code>Bangs.resolve</code>, <code>Keybindings</code> encode/decode/conflict detection, FTS query sanitization, <code>DownloadManager.sanitizedFilename</code>, <code>IdentityStore.registrableDomain</code>.</p>
+<p><span class="pill fix">Fix</span>Add a <code>Package.swift</code> with a test target for those units, plus a macOS-runner workflow that just runs <code>./build.sh</code>. The build script is current (it compiles every directory in one whole-module <code>swiftc -O</code> invocation), so CI is a 20-line file.</p>
+</div>
+
+<div class="card">
+<h3><span class="pill p1">P1</span>Fragile patterns worth a pass</h3>
+<ul>
+<li>Per-tab 1-second repeating <code>Timer</code> for audio state plus private APIs <code>_isPlayingAudio</code>/<code>_setPageMuted:</code> via <code>unsafeBitCast</code> (<span class="ref">Tabs.swift:39, 48-92</span>). Works, degrades gracefully, but N timers for N tabs and a permanent App Store blocker.</li>
+<li><code>IdentityStore.all()</code> hits SQLite on every call and runs in hot paths (tab-bar refresh, and per-navigation via host bindings). Cache it per transaction.</li>
+<li>All SQLite runs synchronously on the main thread. Fine at this scale, unbounded as history grows.</li>
+<li><code>registrableDomain</code> uses a 14-entry hand-maintained two-level TLD set (<span class="ref">Data/Identity.swift:202-215</span>), so host routing mis-buckets things like <code>foo.com.cn</code>.</li>
+<li><code>sqlite3_step</code> return values are almost never checked; a DB open failure only prints and continues.</li>
+<li>Zen mode animates via a hand-rolled 60 fps timer re-running <code>layoutOverlays()</code> every frame.</li>
+</ul>
+</div>
+
+<h2>Security: what holds up, what doesn't</h2>
+<div class="card">
+<h3 class="correct">Done well</h3>
+<ul>
+<li>Passwords in the login Keychain as <code>kSecClassInternetPassword</code> with <code>WhenUnlockedThisDeviceOnly</code>. No plaintext secrets anywhere.</li>
+<li>All JS bridges verify <code>message.frameInfo.securityOrigin</code>, never JS-supplied URLs. Autofill additionally requires a secure context (HTTPS or loopback) before save or fill.</li>
+<li>Navigation policy denies top-level <code>data:</code>/<code>javascript:</code> documents; non-web schemes hand off to the OS only from the main frame.</li>
+<li>Download filenames are contained against path traversal. Internal pages ship a restrictive CSP.</li>
+<li>Passkey entitlement probed at runtime via <code>SecTaskCreateFromSelf</code>; WebAuthn hidden without it, so sites fall back cleanly.</li>
+</ul>
+<h3 class="wrong">Concerns, by severity</h3>
+<table>
+<tr><th style="width:46%">Issue</th><th>Note</th></tr>
+<tr><td>1. Vault not scoped (see P0.1)</td><td>The only genuinely serious one.</td></tr>
+<tr><td>2. Geolocation is all-or-nothing</td><td>Once the app has system authorization, every site gets location with no per-site gate. WebKit on macOS offers no hook. Documented honestly in the site popover; worth a README note.</td></tr>
+<tr><td>3. JS <code>alert/confirm/prompt</code> show no origin</td><td>A page can present spoofed system-looking dialogs. Label the sheet with the site's host.</td></tr>
+<tr><td>4. Autofill fills without auth when no biometric is configured</td><td>Documented fallback, weak default.</td></tr>
+<tr><td>5. <code>SettingsBridge.reply</code> interpolates an untyped <code>id</code> into JS</td><td>Internal origin only, so self-injection at worst. Type-check to Int.</td></tr>
+<tr><td>6. File URLs typed in the omnibox grant read access to the whole parent directory</td><td>User-initiated only, broader than necessary.</td></tr>
+<tr><td>7. <code>isInspectable = true</code> unconditionally on 13.3+</td><td>Fine for a dev-friendly browser; just note it.</td></tr>
+</table>
+</div>
+
+<h2>Feature inventory <small>what exists, what is partial</small></h2>
+<div class="card">
+<table>
+<tr><th style="width:24%">Area</th><th>State</th></tr>
+<tr><td>Tabs</td><td>Complete: MRU cycling, ⌘1-9, drag-reorder, reopen-closed (50 deep), duplicate, close others, audio indicator + mute, auto-hide single strip, prewarmed creation.</td></tr>
+<tr><td>Split view, history, downloads, identities, settings, shortcuts</td><td>Complete. History is SQLite + FTS5 with a paged internal page; identities have isolated data stores, host bindings, and auto-routing.</td></tr>
+<tr><td>Bookmarks</td><td><strong>Partial.</strong> Add via ⌘D alert and a menu listing the top 20. No manager UI, no edit/delete, no <code>chromeless://bookmarks</code>. The folder model exists in JSON but the UI flattens it; <code>addBookmark</code> hardcodes "Favorites".</td></tr>
+<tr><td>Find-in-page</td><td>Works, but only ✓/✗ status: no match count.</td></tr>
+<tr><td>Session restore</td><td>URLs only, flat list into the primary window. No per-window restore, no back/forward stacks.</td></tr>
+<tr><td>Autofill</td><td>Works; no import/export, host-only keying (no subdomain matching: <code>www.</code> and apex are different vault entries).</td></tr>
+<tr><td>Reader mode, private window entry point</td><td>Absent. Ephemeral identities exist but nothing exposes them; WKWebView reader support is untapped.</td></tr>
+</table>
+</div>
+
+<h2>The work queue</h2>
+<p>Ordered so each item is independent and shippable on its own.</p>
+
+<div class="card">
+<h3>P0: this week (correctness and trust)</h3>
+<ol>
+<li>Scope the Vault with <code>kSecAttrService</code>, with a one-time migration of existing items. <span class="ref">Security/Vault.swift</span></li>
+<li>Assign navigation/UI delegates at tab creation, not only in <code>switchToTab</code>. <span class="ref">Browser/BrowserWindow.swift:443</span></li>
+<li>Push to <code>ClosedTabStore</code> in the last-tab close path. One line.</li>
+<li>Rewrite the README to match reality; fix "One file." in About and the stale entitlements comment.</li>
+</ol>
+
+<h3>P1: next (structural)</h3>
+<ol start="5">
+<li>Delete the dead HUD subsystem and the other dead code listed above (~150 lines gone).</li>
+<li>Add the test target (smartURL, Bangs, Keybindings, FTS sanitization, sanitizedFilename, registrableDomain) and a GitHub Actions workflow running <code>./build.sh</code>.</li>
+<li>Begin splitting <code>BrowserWindowController</code>: FindBarController and SuggestionsController first, plus the one-<code>find(direction:)</code> and one-<code>close(tab:)</code> dedup.</li>
+<li>Cache <code>IdentityStore.all()</code>; decide the fate of the <code>visits</code> table.</li>
+</ol>
+
+<h3>P2: product gaps</h3>
+<ol start="9">
+<li>Bookmarks manager page (<code>chromeless://bookmarks</code>) with edit/delete/folders. Data model already supports folders; only UI is missing.</li>
+<li>Find-bar match count ("2 of 17").</li>
+<li>Reader mode affordance in the location bar.</li>
+<li>"New Private Window" command on an ephemeral identity (~15 lines; the machinery exists).</li>
+<li>Favicons in omnibox suggestion rows (the cache already exists).</li>
+<li>Richer tab context menu: Bookmark, Mute Site, Reload, Duplicate to New Window.</li>
+</ol>
+
+<h3>P3: polish</h3>
+<ol start="15">
+<li>Event-driven audio state to replace the per-tab 1s timers (and ideally drop the private APIs).</li>
+<li>Subdomain-aware (eTLD+1) credential matching; password import/export.</li>
+<li>Origin labels on JS dialogs. Universal-binary option in build.sh.</li>
+<li>Custom accent color picker (the accent already flows everywhere; foundation exists).</li>
+<li>Move SQLite writes behind a serial queue before history gets large.</li>
+</ol>
+</div>
+
+<hr>
+<p style="color:#555;font-size:.8rem;text-align:center;margin-top:2.5rem">
+Generated 2026-08-18 · Chromeless assessment v2 · supersedes v1 (same URL)</p>
+
+</div>
+</body>
+</html>

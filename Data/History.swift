@@ -8,8 +8,12 @@ import SQLite3
 // MARK: - History
 
 final class HistoryStore {
-    static let shared = HistoryStore()
-    private let db = DB.shared
+    static let shared = HistoryStore(db: .shared)
+    private let db: DB
+
+    init(db: DB) {
+        self.db = db
+    }
 
     func recordVisit(url: URL, title: String?) {
         guard let host = url.host, let absolute = url.absoluteString.nilIfEmpty else { return }

@@ -8,7 +8,7 @@ import WebKit
 
 /// App-wide stack of recently-closed tab URLs, restored newest-first via ⌘⇧T.
 enum ClosedTabStore {
-    private(set) static var stack: [URL] = []
+    static var stack: [URL] = []
 
     static func push(_ url: URL?) {
         guard let url, url.scheme == "http" || url.scheme == "https" else { return }

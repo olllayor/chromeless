@@ -1,6 +1,8 @@
 Chromeless.app/
 Chromeless.icns
 build/
+.build/
+.swiftpm/
 *.provisionprofile
 .DS_Store
 plan/

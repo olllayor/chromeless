@@ -14,11 +14,10 @@ struct LaunchOptions {
     var size: NSSize? = nil
 }
 
-func parseLaunchOptions() -> LaunchOptions {
+func parseLaunchOptions(args: [String] = Array(CommandLine.arguments.dropFirst())) -> LaunchOptions {
     var opts = LaunchOptions()
     var snapPath: String? = nil
     var wait: TimeInterval = 1.0
-    let args = Array(CommandLine.arguments.dropFirst())
     var i = 0
     while i < args.count {
         let a = args[i]
@@ -65,4 +64,7 @@ func parseLaunchOptions() -> LaunchOptions {
     return opts
 }
 
+/// Parsed once, lazily, on first access (AppDelegate reads it at launch).
+/// Kept as a global declaration rather than top-level code in main.swift so
+/// the library build (SwiftPM/tests) compiles the same sources.
 let launchOptions = parseLaunchOptions()
