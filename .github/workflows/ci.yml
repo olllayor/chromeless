@@ -3,23 +3,46 @@ name: CI
 on:
   push:
     branches: [main, dev]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'NOTICE'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'NOTICE'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Build & test
-    runs-on: macos-latest
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - name: Show toolchain
         run: swift --version
-      # The library target compiles the same sources build.sh uses (minus
-      # main.swift), so a green build here means the app sources still compile.
-      - name: Build
-        run: swift build
+      - name: Cache SwiftPM
+        uses: actions/cache@v4
+        with:
+          path: .build
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift') }}
+          restore-keys: ${{ runner.os }}-spm-
+      # swift test compiles ChromelessCore and the tests. A separate swift build
+      # would recompile the same sources.
       - name: Test
         run: swift test
       # build.sh is what ships the .app (whole-module swiftc -O, includes
       # main.swift, which the SPM library target deliberately excludes).
       - name: Build app
         run: ./build.sh
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        if: success() && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/'))
+        with:
+          name: Chromeless.app
+          path: Chromeless.app
+          retention-days: 7
